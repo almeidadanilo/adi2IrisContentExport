@@ -34,6 +34,7 @@ jsonlFile = ''
 exportObject = []
 c_key = ''
 expirationBias = 365
+waitingTime = 15
 logger = logging.getLogger("vod_logger")
 
 ######################################################################################################
@@ -247,6 +248,8 @@ def fetchAndPrepareADIData(input_file):
     expirationDate = now + datetime.timedelta(days=expirationBias)
     txtContentID = ''
     txtContentName = ''
+    txtEpisodeId = ''
+    txtEpisodeName = ''
     txtContentType = 'VOD'
     objSubtitles = []
     objAudios = []
@@ -265,6 +268,9 @@ def fetchAndPrepareADIData(input_file):
     objResolutions = []
     objProviders = []
     objProducts = []
+    objKeywords = []
+    objOfferTypes = []
+    objOfferNames = []
     #############################################################
     fullGenres = []
     fullParentalRating = []
@@ -283,6 +289,9 @@ def fetchAndPrepareADIData(input_file):
     fullResolutions = []
     fullProviders = []
     fullProducts = []
+    fullKeywords = []
+    fullOfferTypes = []
+    fullOfferNames = []
 
     try:
         # Load the XML file
@@ -320,6 +329,14 @@ def fetchAndPrepareADIData(input_file):
                 value = str(app_data.attrib.get('Value'))
                 #if name in ['Resolution','Languages','Subtitle_Languages','X_DAI_Enabled']:
                 #print(name)
+                # get and parse the content title
+                if name == 'Title':
+                    if value != '':
+                        txtContentName = value.strip()
+                if name == 'Episode_ID':
+                    txtEpisodeId = value.strip()
+                if name == 'Episode_Name':
+                    txtEpisodeName = value.strip()
                 # get and parse the content advisories
                 if name == 'Advisories':
                     advisory_id = value.replace(' ','_').upper()
@@ -404,8 +421,15 @@ def fetchAndPrepareADIData(input_file):
                         objAwards.append(award_id)
                         if award_id not in fullAwards:
                             fullAwards.append(award_id)
+                # get and parse the X_Keywords
+                if name == 'X_Keyword':
+                    keyword_id = value.replace(' ','_').upper()
+                    if keyword_id != "":
+                        objKeywords.append(keyword_id)
+                        if keyword_id not in fullKeywords:
+                            fullKeywords.append(keyword_id)
             ###################################################################
-            # Process the Movie ADI section
+            # Process the sub sessions
             ###################################################################
             for sub_asset in asset.findall('./Asset'):
                 sub_metadata = sub_asset.find('./Metadata')
@@ -420,6 +444,9 @@ def fetchAndPrepareADIData(input_file):
                 logger.debug(f"SubPackage Asset_Name: {str(ams.attrib.get('Asset_Name'))}")
                 logger.debug(f"SubPackage Asset_ID: {str(ams.attrib.get('Asset_ID'))}")
                 logger.debug(f"SubPackage Class_ID: {cls}")
+                ###################################################################
+                # Process the Movie ADI section
+                ###################################################################                
                 if cls == 'movie':
                     logger.debug(f"Processing SubPackage Class_ID: {cls}")
                     for sub_app_data in sub_metadata.findall('App_Data'):
@@ -446,6 +473,28 @@ def fetchAndPrepareADIData(input_file):
                                 objSubtitles.append(subtitle_id)
                                 if subtitle_id not in fullSubtitles:
                                     fullSubtitles.append(subtitle_id)
+                ###################################################################
+                # Process the offer-window ADI section
+                ################################################################### 
+                if cls == 'offer-window':
+                    logger.debug(f"Processing SubPackage Class_ID: {cls}")
+                    for sub_app_data in sub_metadata.findall('App_Data'):
+                        name = str(sub_app_data.attrib.get('Name'))
+                        value = str(sub_app_data.attrib.get('Value'))
+                        # get and parse offer types
+                        if name == 'Offer_Type':
+                            offertype_id = value.replace(' ','_').upper()
+                            if offertype_id != "":
+                                objOfferTypes.append(offertype_id)
+                                if offertype_id not in fullOfferTypes:
+                                    fullOfferTypes.append(offertype_id)
+                        # get and parse offer names
+                        if name == 'Product_Name':
+                            offername_id = value.replace(' ','_').upper()
+                            if offername_id != "":
+                                objOfferNames.append(offername_id)
+                                if offername_id not in fullOfferNames:
+                                    fullOfferNames.append(offername_id)
         #################################################################################################
         #################################################################################################
         metadata_block = {}     
@@ -463,16 +512,23 @@ def fetchAndPrepareADIData(input_file):
             "CntProducers": objProducers,
             "CntStudios": objStudios,
             "CntCountryOfOrigin": fullCountryofOrigin,
-            "CntarentalRating": objParentalRating,
+            "CntParentalRating": objParentalRating,
             "CntAwards": objAwards,
             "CntResolutions": objResolutions,
             "AudioLanguages": objAudios,
-            "SubtitleLanguages": objSubtitles
+            "SubtitleLanguages": objSubtitles,
+            "CntKeywords": objKeywords,
+            "CntOfferTypes": objOfferTypes,
+            "CntOfferNames": objOfferNames
         }
         # Add to the objTmp only the items listed in outMetadata
         for key, value in all_metadata_fields.items():
             if key in outMetadata:
                 metadata_block[key] = value
+        #################################################################################################
+        # If is a series, add the episode id and episode name to the content title
+        if txtEpisodeId != '' or txtEpisodeName != '':
+            txtContentName += ' - ' + txtEpisodeId + ' ' + txtEpisodeName
         #################################################################################################
         objTmp = {
             "contentId": txtContentID,
@@ -524,7 +580,13 @@ def fetchAndPrepareADIData(input_file):
         if (len(fullAudios) > 0 and "AudioLanguages" in outMetadata):
             processKVP("AudioLanguages", fullAudios)
         if (len(fullSubtitles) > 0 and "SubtitleLanguages" in outMetadata):
-            processKVP("SubtitleLanguages", fullSubtitles)         
+            processKVP("SubtitleLanguages", fullSubtitles)
+        if (len(fullKeywords) > 0 and "CntKeywords" in outMetadata):
+            processKVP("CntKeywords", fullKeywords)
+        if (len(fullOfferTypes) > 0 and "CntOfferTypes" in outMetadata):
+            processKVP("CntOfferTypes", fullOfferTypes)
+        if (len(fullOfferNames) > 0 and "CntOfferNames" in outMetadata):
+            processKVP("CntOfferNames", fullOfferNames)
         logger.info("Finished to process the KVPs")
 
     except TypeError as tp:
@@ -534,12 +596,12 @@ def fetchAndPrepareADIData(input_file):
             try:
                 json.dumps(item)
             except TypeError as inner_e:
-                logger.debug(f"⚠️  exportObject[{i}] failed: {inner_e}")
+                logger.debug(f"exportObject[{i}] failed: {inner_e}")
                 logger.debug(json.dumps(item, indent=2, default=str))
                 break
     except Exception as e:
-        logger.info("Error fetchAndPrepareGoData")
-        logger.debug(f"Error fetchAndPrepareGoData: {e}")
+        logger.info("Error fetchAndPrepareADIData")
+        logger.debug(f"Error fetchAndPrepareADIData: {e}")
 
 ######################################################################################################
 # Save the metadata structure into the export json file
@@ -662,7 +724,7 @@ def wait(seconds):
 parser = argparse.ArgumentParser()
 parser.add_argument('-input', type=str, default='',help='ADI input file (.xml)')
 parser.add_argument('-output', type=str, default='',help='Iris Tenant ID')
-parser.add_argument('-log', type=str, default='file', choices=['console', 'file'], help='Log output destination')
+parser.add_argument('-log', type=str, default='file', choices=['file'], help='Log output destination')
 parser.add_argument('-level', type=str, default='debug', choices=['info', 'debug'], help='Log verbosity level')
 args = parser.parse_args()
 input_file = args.input
@@ -700,9 +762,9 @@ bot = create_boto3_client()
 # Push the jsonl file to AWS Folder
 logger.debug("Sending the jsonl to S3 bucket")
 send_jsonl(bot, "add")
-# Wait for 1 minute
-logger.debug("Waiting: 60s")
-wait(60)
+# Wait for 'n' seconds
+logger.debug(f"Waiting: {waitingTime}s")
+wait(waitingTime)
 # Check if the file was properly processed
 logger.debug("Checking S3")
 check_bucket(bot)

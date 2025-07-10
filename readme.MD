@@ -72,7 +72,10 @@ Example:
         "CntAwards",            -- from <ADI><Asset><Metadata><App_Data Name="X_Award" />
         "CntResolutions",       -- from <ADI><Asset><Asset><Metadata><App_Data Name="Resolution" (when <AMS Asset_Class="movie"/>) />
         "AudioLanguages",       -- from <ADI><Asset><Asset><Metadata><App_Data Name="Languages" (when <AMS Asset_Class="movie"/>) />
-        "SubtitleLanguages"     -- from <ADI><Asset><Asset><Metadata><App_Data Name="Subtitle_Languages" (when <AMS Asset_Class="movie"/>) />
+        "SubtitleLanguages",    -- from <ADI><Asset><Asset><Metadata><App_Data Name="Subtitle_Languages" (when <AMS Asset_Class="movie"/>) />
+        "CntKeywords",          -- from <ADI><Asset><Metadata><App_Data Name="X_Keyword" />
+        "CntOfferTypes",        -- from <ADI><Asset><Asset><Metadata><App_Data Name="Offer_Type" (when <AMS Asset_Class="offer-window"/>) />
+        "CntOfferNames"         -- from <ADI><Asset><Asset><Metadata><App_Data Name="Product_Name" (when <AMS Asset_Class="offer-window"/>) />
       ]
     }
   ]
@@ -82,6 +85,15 @@ The kvp in Iris will be represented as: key={METADATA.key}, Value={values from A
 To not process one or more of the metadata listed, simply remove the entry from metadata in `output.ini.json`.
 This script do not print any information in the prompt, it logs everything in the `vod_ingest.log` file, cumulative.
 For asset exipiration o Iris ingested data collection the script offer a variable caller `expirationBias` default set to 365 (days) should present the amount of days for the ingested content to expire in Iris.
+
+"contentId"                     -- from <ADI><Asset><Metadata><AMS Asset_ID/>
+"contentName"                   -- from <ADI><Asset><Metadata><App_Data Name="Title" />
+                                --      as fallback it will get from <ADI><Asset><Metadata><AMS Asset_Name/>
+                                --      if the properties 'Episode_ID' and 'Episode_Name' were present in the <ADI><Asset><Metadata><App_Data />,
+                                        the script will compose the contentName with Title + ' ' + Episode_ID + ' - ' + Episode_Name
+"contentType"                   -- hardcoded 'VOD'
+"expirationDate"                -- fixed now () + 365 days
+"control"                       -- hardcoded '{"allowAdInsertion": True}'
 
 ```
 
