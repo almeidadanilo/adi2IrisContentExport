@@ -1,15 +1,16 @@
 import json
 import datetime
 import os
-import requests
+import requests # type: ignore
 import argparse
-import boto3
+import boto3 # type: ignore
 import time
 import logging
 import re
+import sys
 import xml.etree.ElementTree as ET
 from datetime import timezone
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet # type: ignore
 
 ######################################################################################################
 # Global variables
@@ -177,7 +178,14 @@ def processKVP(key, values):
 
     try:
         logger.debug("Enter processKVP")
-        ordered_values = sorted(values)  # Sorts alphabetically or numerically
+
+        # Ensure the key is respecting the character limit
+        if len(key) > 20:
+            logger.warning(f"Skipping KVP key {key}: exceeds 20 chars.")
+            return
+
+        # Sorts alphabetically or numerically
+        ordered_values = sorted(values)  
         body = {
             "key": key,
             "values": ordered_values
@@ -224,7 +232,9 @@ def processKVP(key, values):
         else:
             logger.debug(f"Unexpected API return: {response.status_code}")
             return
+        
         logger.debug("Exit processKVP")
+
     except Exception as e:
             logger.info("Error Process KVP")
             logger.debug(f"Error Process KVP: {e}")
@@ -717,15 +727,45 @@ def wait(seconds):
     for i in range(seconds, 0, -1):
         time.sleep(1)
 
+
+######################################################################################################
+# Delete the local files
+######################################################################################################
+def delete_files():
+    global jsonlFile
+    try:
+        logger.debug("Entering delete_files")
+
+        # Remove the noident one
+        if jsonlFile and os.path.exists(jsonlFile):
+            os.remove(jsonlFile)
+            logger.info(f"Deleted file: {jsonlFile}")
+        else:
+            logger.warning(f"File not found for deletion: {jsonlFile}")
+
+        # Remove the idented one
+        jsonFile = jsonlFile.replace('_noindent', '')
+        if jsonFile and os.path.exists(jsonFile):
+            os.remove(jsonFile)
+            logger.info(f"Deleted file: {jsonFile}")
+        else:
+            logger.warning(f"File not found for deletion: {jsonFile}")
+
+        logger.debug("Exiting delete_files")
+    except Exception as e:
+        logger.error("Error delete_files")
+        logger.error(f"Error delete_files: {e}")
+
 ######################################################################################################
 # Main Loop
 ######################################################################################################
-
 parser = argparse.ArgumentParser()
 parser.add_argument('-input', type=str, default='',help='ADI input file (.xml)')
 parser.add_argument('-output', type=str, default='',help='Iris Tenant ID')
 parser.add_argument('-log', type=str, default='file', choices=['file'], help='Log output destination')
 parser.add_argument('-level', type=str, default='debug', choices=['info', 'debug'], help='Log verbosity level')
+parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
+parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
 args = parser.parse_args()
 input_file = args.input
 iristenant = args.output
@@ -738,10 +778,10 @@ logger.debug("#######################################")
 
 if (not(getOutputItems(iristenant))):
     logger.debug ('Error getting output items')
-    exit (-1)
+    sys.exit(1)
 
 # Build Iris Access Token
-if irisTK == '':
+if irisTK == '' and args.export == 'yes':
     logger.debug("Calling getIrisAccessToken")
     getIrisAccessToken()
 
@@ -755,19 +795,25 @@ logger.debug("Saving the jsonl file")
 saveMetadataFile()
 if len(exportObject) == 0:
     logger.debug ('Error fetching the VOD metadata')
-    exit(-1)
-# Create BOTO client
-logger.debug("Creating BOTO client")
-bot = create_boto3_client()
-# Push the jsonl file to AWS Folder
-logger.debug("Sending the jsonl to S3 bucket")
-send_jsonl(bot, "add")
-# Wait for 'n' seconds
-logger.debug(f"Waiting: {waitingTime}s")
-wait(waitingTime)
-# Check if the file was properly processed
-logger.debug("Checking S3")
-check_bucket(bot)
+    sys.exit(1)
+
+if args.export == 'yes':
+    # Create BOTO client
+    logger.debug("Creating BOTO client")
+    bot = create_boto3_client()
+    # Push the jsonl file to AWS Folder
+    logger.debug("Sending the jsonl to S3 bucket")
+    send_jsonl(bot, "add")
+    # Wait for 'n' seconds
+    logger.debug(f"Waiting: {waitingTime}s")
+    wait(waitingTime)
+    # Check if the file was properly processed
+    logger.debug("Checking S3")
+    check_bucket(bot)
+
+if args.deletefile == 'yes':
+    # Delete the local files
+    delete_files()
 
 logger.debug("#######################################")
 logger.debug('# END PROCESSING ')
