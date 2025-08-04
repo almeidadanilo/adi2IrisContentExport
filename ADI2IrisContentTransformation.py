@@ -312,17 +312,19 @@ def fetchAndPrepareADIData(input_file):
         package_ams = package_metadata.find('AMS')
         logger.debug(f"Package Asset_Name: {str(package_ams.attrib.get('Asset_Name'))}")
         logger.debug(f"Package Asset_ID: {str(package_ams.attrib.get('Asset_ID'))}")
-        txtContentName = package_ams.attrib.get('Asset_Name', '')
+        #txtContentName = package_ams.attrib.get('Asset_Name', '')
+        # Get the content ID from the Metadata > asset_class='title'
         txtContentID = package_ams.attrib.get('Asset_ID', '')
         if txtContentID == '':
             logger.debug("Error getting the content ID.")
             return
-
+        # Get the provider ID from the Metadata > asset_class='title'
         provider_id = package_ams.attrib.get('Provider_ID', '').upper()
         if provider_id != "":
             objProviders.append(provider_id)
             if provider_id not in fullProviders:
                 fullProviders.append(provider_id)
+        # Get the product ID from the Metadata > asset_class='title'
         product_id = package_ams.attrib.get('Product', '').upper()
         if product_id != "":
             objProducts.append(product_id)
@@ -330,6 +332,9 @@ def fetchAndPrepareADIData(input_file):
                 fullProducts.append(product_id)
         # Iterate through assets
         for asset in root.findall('./Asset'):
+            txtEpisodeId = ''
+            txtEpisodeName = ''
+            txtContentName = ''
             asset_metadata = asset.find('Metadata')
             ###################################################################
             # Process the Title ADI section
@@ -343,8 +348,10 @@ def fetchAndPrepareADIData(input_file):
                 if name == 'Title':
                     if value != '':
                         txtContentName = value.strip()
+                # get and parse the EpisodeID in case of series
                 if name == 'Episode_ID':
                     txtEpisodeId = value.strip()
+                # get and parse the EpisodeName in case of series
                 if name == 'Episode_Name':
                     txtEpisodeName = value.strip()
                 # get and parse the content advisories
@@ -383,21 +390,21 @@ def fetchAndPrepareADIData(input_file):
                         if production_id not in fullProductionYears:
                             fullProductionYears.append(production_id)
                 # get and parse actors
-                if name == 'Actors':
+                if name == 'Actors' or name == 'Actor':
                     actor_id = format_person_name(value).upper()
                     if actor_id != "":
                         objActors.append(actor_id)
                         if actor_id not in fullActors:
                             fullActors.append(actor_id)         
                 # get and parse directors
-                if name == 'Director':
+                if name == 'Directors' or name == 'Director':
                     director_id = format_person_name(value).upper()
                     if director_id != "":
                         objDirectors.append(director_id)
                         if director_id not in fullDirectors:
                             fullDirectors.append(director_id)
                 # get and parse Producers
-                if name == 'Producers':
+                if name == 'Producers' or name == 'Producer':
                     producer_id = format_person_name(value).upper()
                     if producer_id != "":
                         objProducers.append(producer_id)
@@ -414,9 +421,20 @@ def fetchAndPrepareADIData(input_file):
                 if name == 'Country_of_Origin':
                     country_id = value.replace(' ','_').upper()
                     if country_id != "":
-                        objCountryOfOrigin.append(country_id)
-                        if country_id not in fullCountryofOrigin:
-                            fullCountryofOrigin.append(country_id)         
+                        # Handle the cases where multiple countries are informed in a single entry
+                        # Check for string '|' as country divisor
+                        country_id = country_id.replace('/', '|')
+                        if country_id.find('|') >= 0:
+                            country_id_parts = gr_id.split('|')
+                            for country_sub_id in country_id_parts:
+                                if country_sub_id != '':
+                                    objCountryOfOrigin.append(country_sub_id)
+                                    if country_sub_id not in fullCountryofOrigin:
+                                        fullCountryofOrigin.append(country_sub_id)
+                        else:
+                            objCountryOfOrigin.append(country_id)
+                            if country_id not in fullCountryofOrigin:
+                                fullCountryofOrigin.append(country_id)         
                 # get and parse Parental Control
                 if name == 'Rating':
                     parental_id = value.replace(' ','_').upper()
@@ -462,13 +480,6 @@ def fetchAndPrepareADIData(input_file):
                     for sub_app_data in sub_metadata.findall('App_Data'):
                         name = str(sub_app_data.attrib.get('Name'))
                         value = str(sub_app_data.attrib.get('Value'))
-                        # get and parse Audio Languages
-                        if name == 'Languages':
-                            audio_id = value.replace(' ','_').upper()
-                            if audio_id != "":
-                                objAudios.append(audio_id)
-                                if audio_id not in fullAudios:
-                                    fullAudios.append(audio_id)
                         # get and parse Resolution
                         if name == 'Resolution':
                             resolution_id = value.replace(' ','_').upper()
@@ -476,6 +487,13 @@ def fetchAndPrepareADIData(input_file):
                                 objResolutions.append(resolution_id)
                                 if resolution_id not in fullResolutions:
                                     fullResolutions.append(resolution_id)
+                        # get and parse Audio Languages
+                        if name == 'Languages':
+                            audio_id = value.replace(' ','_').upper()
+                            if audio_id != "":
+                                objAudios.append(audio_id)
+                                if audio_id not in fullAudios:
+                                    fullAudios.append(audio_id)
                         # get and parse Subtitles
                         if name == 'Subtitle_Languages':
                             subtitle_id = value.replace(' ','_').upper()
