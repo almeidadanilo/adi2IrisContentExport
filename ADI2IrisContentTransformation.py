@@ -1,16 +1,30 @@
+# prerequisites:
+#     pip install requests
+#     pip install boto3
+#     pip install paramiko
+
+# Usage:
+#       python <script_name>.py -input <Local_ADI_File> -output <Iris_Tenant_ID> -export <yes|no> -deleletefile <yes|no>
+#
+# 
+#
+# Version:
+# v1.5 - Coded and Tested with multiple ADI input files.
+#           <Danilo Almeida>
+
 import json
 import datetime
 import os
-import requests # type: ignore
+import requests                         # type: ignore
 import argparse
-import boto3 # type: ignore
+import boto3                            # type: ignore
 import time
 import logging
 import re
 import sys
 import xml.etree.ElementTree as ET
 from datetime import timezone
-from cryptography.fernet import Fernet # type: ignore
+from cryptography.fernet import Fernet  # type: ignore
 
 ######################################################################################################
 # Global variables
@@ -37,6 +51,7 @@ c_key = ''
 expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
+__CURRENT_VERSION__ = 'v1.5'
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -249,7 +264,7 @@ def format_person_name(name):
     return name.replace(' ', '_')
 
 ######################################################################################################
-# Build json response from Go
+# Build json response from ADI
 ######################################################################################################
 def fetchAndPrepareADIData(input_file):
     global exportObject
@@ -261,6 +276,7 @@ def fetchAndPrepareADIData(input_file):
     txtEpisodeId = ''
     txtEpisodeName = ''
     txtContentType = 'VOD'
+    txtProcessingWindowExpire = ''
     objSubtitles = []
     objAudios = []
     objGenres = []
@@ -456,6 +472,9 @@ def fetchAndPrepareADIData(input_file):
                         objKeywords.append(keyword_id)
                         if keyword_id not in fullKeywords:
                             fullKeywords.append(keyword_id)
+                # get and parse the Processing Window
+                if name == 'Licensing_Window_End':
+                    txtProcessingWindowExpire = value
             ###################################################################
             # Process the sub sessions
             ###################################################################
@@ -562,7 +581,7 @@ def fetchAndPrepareADIData(input_file):
             "contentId": txtContentID,
             "contentName": txtContentName,
             "contentType": [txtContentType],
-            "expirationDate": str(expirationDate.isoformat()),
+            "expirationDate": txtProcessingWindowExpire if txtProcessingWindowExpire.strip() != '' else str(expirationDate.isoformat()),
             "control": {"allowAdInsertion": True},
             "metadata": metadata_block
         }
@@ -791,7 +810,7 @@ iristenant = args.output
 setup_logger(args.log, args.level)
 
 logger.debug("#######################################")
-logger.debug('# BEGIN PROCESSING ')
+logger.debug(f'# BEGIN PROCESSING {os.path.basename(__file__)} {__CURRENT_VERSION__}")')
 logger.debug("#######################################")
 
 if (not(getOutputItems(iristenant))):
