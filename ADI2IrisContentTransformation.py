@@ -11,6 +11,8 @@
 # Version:
 # v1.5 - Coded and Tested with multiple ADI input files.
 #           <Danilo Almeida>
+# v1.6 - Updated Access Tenant credentials
+#           <Danilo Almeida>
 
 import json
 import datetime
@@ -51,7 +53,7 @@ c_key = ''
 expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
-__CURRENT_VERSION__ = 'v1.5'
+__CURRENT_VERSION__ = 'v1.6'
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -810,7 +812,7 @@ iristenant = args.output
 setup_logger(args.log, args.level)
 
 logger.debug("#######################################")
-logger.debug(f'# BEGIN PROCESSING {os.path.basename(__file__)} {__CURRENT_VERSION__}")')
+logger.debug(f'# BEGIN PROCESSING {os.path.basename(__file__)} {__CURRENT_VERSION__}')
 logger.debug("#######################################")
 
 if (not(getOutputItems(iristenant))):
