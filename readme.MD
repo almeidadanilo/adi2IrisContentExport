@@ -24,7 +24,9 @@ This Python script parses **ADI XML metadata files** (e.g., from VOD systems), e
 ├── output.ini.json                 # Encrypted credentials and `outMetadata` keys (*) you must contact Synamedia in order to  get this file
 ├── secret.key                      # Key used for decryption (*) you must contact Synamedia in order to  get this file
 ├── *.cnt.jsonl                     # Output files generated
-└── vod_ingest.log                  # Logging output (if using file mode)
+├── vod_ingest.log                  # Logging output (if using file mode)
+├── build                           # temporary and support files for pyinstaller to build the executables (Windows and           Linux), please check "making_executable.txt"
+└── dist                            # place for the .exe (Windows) and .bin (Linux) executable files
 ```
 
 ---

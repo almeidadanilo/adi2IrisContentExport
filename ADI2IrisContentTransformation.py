@@ -443,7 +443,7 @@ def fetchAndPrepareADIData(input_file):
                         # Check for string '|' as country divisor
                         country_id = country_id.replace('/', '|')
                         if country_id.find('|') >= 0:
-                            country_id_parts = gr_id.split('|')
+                            country_id_parts = country_id.split('|')
                             for country_sub_id in country_id_parts:
                                 if country_sub_id != '':
                                     objCountryOfOrigin.append(country_sub_id)

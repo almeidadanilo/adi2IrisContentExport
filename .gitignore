@@ -13,6 +13,7 @@
 
 # production
 /build
+/dist
 
 # misc
 .DS_Store
@@ -31,5 +32,6 @@ yarn-error.log*
 *.key
 *.log
 *.zip
-*.txt
 *.xml
+*.exe
+*.bin

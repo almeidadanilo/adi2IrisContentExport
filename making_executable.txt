@@ -1,0 +1,16 @@
+** This is considering running it from a Windows machine
+
+For Windows:
+    
+    [if pyinstaller is not installed, then: pip install pyinstaller]
+
+    pyinstaller --onefile --noconsole --icon=iris.ico ADI2IrisContentTransformation.py
+
+
+For Linux:
+
+    [Make sure you have docker desktop installed on this Windows machine]
+    
+    docker run --rm -v "%cd%":/src python:3.11-slim bash -c "apt-get update && apt-get install -y binutils && cd /src && pip install pyinstaller && pyinstaller --onefile ADI2IrisContentTransformation.py"
+    
+    Note: the Linux executable may present problems during runtime it may require to get run permissions: sudo chmod +x [file_name]
