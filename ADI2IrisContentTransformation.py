@@ -13,6 +13,9 @@
 #           <Danilo Almeida>
 # v1.6 - Updated Access Tenant credentials
 #           <Danilo Almeida>
+# v1.7 - Updated KVP Value limit truncation
+#        Added file|directory flag option and multiple ADI file processing
+#           <Danilo Almeida>
 
 import json
 import datetime
@@ -27,6 +30,8 @@ import sys
 import xml.etree.ElementTree as ET
 from datetime import timezone
 from cryptography.fernet import Fernet  # type: ignore
+from pathlib import Path                # type: ignore
+from typing import Iterator, Union      # type: ignore
 
 ######################################################################################################
 # Global variables
@@ -53,7 +58,8 @@ c_key = ''
 expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
-__CURRENT_VERSION__ = 'v1.6'
+_KVP_VALUE_LIMIT_ = 40
+__CURRENT_VERSION__ = 'v1.7'
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -91,7 +97,7 @@ def decrypt(enc_data):
 
     if c_key == '':
         c_key = getCryptoKey()
-        logger.debug(f"Key acquired: {c_key}")
+        logger.debug(f"Key acquired: {''}")
     
     fer = Fernet(c_key)
 
@@ -124,22 +130,22 @@ def getOutputItems(iristenant):
                         outURL = decrypt(item["URL"])
                         logger.debug(f"Iris Authorization API: {outURL}")
                         outGTP = decrypt(item["GT"])
-                        logger.debug(f"Iris Grants: {outGTP}")
+                        #logger.debug(f"Iris Grants: {outGTP}")
                         outAUT = decrypt(item["AU"])
-                        logger.debug(f"Iris Authorize Entity: {outAUT}")
+                        #logger.debug(f"Iris Authorize Entity: {outAUT}")
                         outCID = decrypt(item["CI"])
-                        logger.debug(f"Iris ClientID: {outCID}")
+                        #logger.debug(f"Iris ClientID: {outCID}")
                         outCSC = decrypt(item["CS"])
-                        logger.debug(f"Iris ClientS: {outCSC}")
+                        #logger.debug(f"Iris ClientS: {outCSC}")
                         irisTN = item["iristenant"]
                         outBucket = decrypt(item["BK"])
-                        logger.debug(f"Iris Upload Bucket: {outBucket}")
+                        #logger.debug(f"Iris Upload Bucket: {outBucket}")
                         outKVP = decrypt(item["KVP"])
-                        logger.debug(f"Iris KVP API: {outKVP}")
+                        #logger.debug(f"Iris KVP API: {outKVP}")
                         outACR = decrypt(item["ACR"])
-                        logger.debug(f"Iris AWS: {outACR}")
+                        #logger.debug(f"Iris AWS: {outACR}")
                         outMetadata = item["METADATA"]
-                        logger.debug(f"Export ADI Metadata: {outMetadata}")
+                        #logger.debug(f"Export ADI Metadata: {outMetadata}")
                         return True
 
         except Exception as e:
@@ -183,9 +189,43 @@ def getIrisAccessToken():
             irisTK = ''
 
     except Exception as e:
-        logger.info("Error getting Iris access token")
-        logger.debug(f"Error getting Iris access token: {e}")
+        logger.error(f"Error getting Iris access token: {e}")
 
+######################################################################################################
+# Function to process and normalize the KVP values
+######################################################################################################
+def normalizeKVPValues(kvp: str, case: str, limit: int) -> str:
+    try:
+        if not kvp:
+            return ""
+
+        # 1) spaces/tabs/newlines -> single underscore
+        s = re.sub(r"\s+", "_", kvp)
+
+        # 2) delete a set of punctuation
+        tmpstr = s.translate(str.maketrans("", "", ".-|/\\,;:()[]{}&!*%#@"))
+
+        # 3) collapse multiple underscores that might have been created
+        tmpstr = re.sub(r"_+", "_", tmpstr)
+
+        # 4) NEW: remove any non-letters at the start or end
+        tmpstr = re.sub(r"^[^A-Za-z]+", "", tmpstr)   # strip leading non-letters
+        tmpstr = re.sub(r"[^A-Za-z]+$", "", tmpstr)   # strip ending non-letters
+
+        # 5) enforce length limit (if any)
+        if limit > 0 and len(tmpstr) > limit:
+            tmpstr = tmpstr[:limit]
+
+        # 6) casing
+        if case == "U":
+            tmpstr = tmpstr.upper()
+        elif case == "L":
+            tmpstr = tmpstr.lower()
+
+        return tmpstr
+    except Exception as e:
+        logger.error(f"Error on normalizeKVPValues for {kvp}: {e}")
+        return ""
 
 ######################################################################################################
 # Check whether the KVP already exists in Iris, if not, then create it
@@ -253,8 +293,7 @@ def processKVP(key, values):
         logger.debug("Exit processKVP")
 
     except Exception as e:
-            logger.info("Error Process KVP")
-            logger.debug(f"Error Process KVP: {e}")
+            logger.error(f"Error Process KVP: {e}")
 
 ######################################################################################################
 # Format the person name for Iris format and invert last with first name
@@ -264,6 +303,16 @@ def format_person_name(name):
         last, first = [part.strip() for part in name.split(',', 1)]
         return f"{first}_{last}".replace(' ', '_')
     return name.replace(' ', '_')
+
+######################################################################################################
+# Iterate on a provided directory for all XML files
+######################################################################################################
+def iter_xml_files_ci(directory: Union[str, Path], recursive: bool = False):
+    p = Path(directory)
+    pattern = "**/*" if recursive else "*"
+    for path in p.glob(pattern):
+        if path.is_file() and path.suffix.lower() == ".xml":
+            yield path
 
 ######################################################################################################
 # Build json response from ADI
@@ -374,28 +423,28 @@ def fetchAndPrepareADIData(input_file):
                     txtEpisodeName = value.strip()
                 # get and parse the content advisories
                 if name == 'Advisories':
-                    advisory_id = value.replace(' ','_').upper()
+                    advisory_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if advisory_id != "":
                         objContentAdvisory.append(advisory_id)
                         if advisory_id not in fullContentAdvisory:
                             fullContentAdvisory.append(advisory_id)
                 # get and parse content categories
                 if name == 'Category':
-                    category_id = value.replace(' ','_').upper()
+                    category_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if category_id != "":
                         objContentCategories.append(category_id)
                         if category_id not in fullContentCategories:
                             fullContentCategories.append(category_id)
                 # get and parse content genres
                 if name == 'Genre':
-                    genre_id = value.replace(' ','_').upper()
+                    genre_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if genre_id != "" and is_alnum_full(genre_id):
                         objGenres.append(genre_id)
                         if genre_id not in fullGenres:
                             fullGenres.append(genre_id)
                 # get and parse content audiences
                 if name == 'Audience':
-                    audience_id = value.replace(' ','_').upper()
+                    audience_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if audience_id != "":
                         objContentAudiences.append(audience_id)
                         if audience_id not in fullContentAudiences:
@@ -409,35 +458,38 @@ def fetchAndPrepareADIData(input_file):
                             fullProductionYears.append(production_id)
                 # get and parse actors
                 if name == 'Actors' or name == 'Actor':
-                    actor_id = format_person_name(value).upper()
+                    actor_id = format_person_name(value)
+                    actor_id = normalizeKVPValues(actor_id, 'U', _KVP_VALUE_LIMIT_)
                     if actor_id != "":
                         objActors.append(actor_id)
                         if actor_id not in fullActors:
                             fullActors.append(actor_id)         
                 # get and parse directors
                 if name == 'Directors' or name == 'Director':
-                    director_id = format_person_name(value).upper()
+                    director_id = format_person_name(value)
+                    director_id = normalizeKVPValues(director_id, 'U', _KVP_VALUE_LIMIT_)
                     if director_id != "":
                         objDirectors.append(director_id)
                         if director_id not in fullDirectors:
                             fullDirectors.append(director_id)
                 # get and parse Producers
                 if name == 'Producers' or name == 'Producer':
-                    producer_id = format_person_name(value).upper()
+                    producer_id = format_person_name(value)
+                    producer_id = normalizeKVPValues(producer_id, 'U', _KVP_VALUE_LIMIT_)
                     if producer_id != "":
                         objProducers.append(producer_id)
                         if producer_id not in fullProducers:
                             fullProducers.append(producer_id)                    
                 # get and parse Studio
                 if name == 'Studio':
-                    studio_id = value.replace(' ','_').upper()
+                    studio_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if studio_id != "":
                         objStudios.append(studio_id)
                         if studio_id not in fullStudios:
                             fullStudios.append(studio_id)
                 # get and parse Country of Origin
                 if name == 'Country_of_Origin':
-                    country_id = value.replace(' ','_').upper()
+                    country_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if country_id != "":
                         # Handle the cases where multiple countries are informed in a single entry
                         # Check for string '|' as country divisor
@@ -445,31 +497,33 @@ def fetchAndPrepareADIData(input_file):
                         if country_id.find('|') >= 0:
                             country_id_parts = country_id.split('|')
                             for country_sub_id in country_id_parts:
+                                country_sub_id = normalizeKVPValues(country_sub_id, 'U', _KVP_VALUE_LIMIT_)
                                 if country_sub_id != '':
                                     objCountryOfOrigin.append(country_sub_id)
                                     if country_sub_id not in fullCountryofOrigin:
                                         fullCountryofOrigin.append(country_sub_id)
                         else:
+                            country_id = normalizeKVPValues(country_id, 'U', _KVP_VALUE_LIMIT_)
                             objCountryOfOrigin.append(country_id)
                             if country_id not in fullCountryofOrigin:
                                 fullCountryofOrigin.append(country_id)         
                 # get and parse Parental Control
                 if name == 'Rating':
-                    parental_id = value.replace(' ','_').upper()
+                    parental_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if parental_id != "":
                         objParentalRating.append(parental_id)
                         if parental_id not in fullParentalRating:
                             fullParentalRating.append(parental_id)          
                 # get and parse the X_Award
                 if name == 'X_Award':
-                    award_id = value.replace(' ','_').upper()
+                    award_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if award_id != "":
                         objAwards.append(award_id)
                         if award_id not in fullAwards:
                             fullAwards.append(award_id)
                 # get and parse the X_Keywords
                 if name == 'X_Keyword':
-                    keyword_id = value.replace(' ','_').upper()
+                    keyword_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                     if keyword_id != "":
                         objKeywords.append(keyword_id)
                         if keyword_id not in fullKeywords:
@@ -495,7 +549,7 @@ def fetchAndPrepareADIData(input_file):
                 logger.debug(f"SubPackage Class_ID: {cls}")
                 ###################################################################
                 # Process the Movie ADI section
-                ###################################################################                
+                ###################################################################
                 if cls == 'movie':
                     logger.debug(f"Processing SubPackage Class_ID: {cls}")
                     for sub_app_data in sub_metadata.findall('App_Data'):
@@ -503,21 +557,21 @@ def fetchAndPrepareADIData(input_file):
                         value = str(sub_app_data.attrib.get('Value'))
                         # get and parse Resolution
                         if name == 'Resolution':
-                            resolution_id = value.replace(' ','_').upper()
+                            resolution_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                             if resolution_id != "":
                                 objResolutions.append(resolution_id)
                                 if resolution_id not in fullResolutions:
                                     fullResolutions.append(resolution_id)
                         # get and parse Audio Languages
                         if name == 'Languages':
-                            audio_id = value.replace(' ','_').upper()
+                            audio_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                             if audio_id != "":
                                 objAudios.append(audio_id)
                                 if audio_id not in fullAudios:
                                     fullAudios.append(audio_id)
                         # get and parse Subtitles
                         if name == 'Subtitle_Languages':
-                            subtitle_id = value.replace(' ','_').upper()
+                            subtitle_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                             if subtitle_id != "":
                                 objSubtitles.append(subtitle_id)
                                 if subtitle_id not in fullSubtitles:
@@ -532,14 +586,14 @@ def fetchAndPrepareADIData(input_file):
                         value = str(sub_app_data.attrib.get('Value'))
                         # get and parse offer types
                         if name == 'Offer_Type':
-                            offertype_id = value.replace(' ','_').upper()
+                            offertype_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                             if offertype_id != "":
                                 objOfferTypes.append(offertype_id)
                                 if offertype_id not in fullOfferTypes:
                                     fullOfferTypes.append(offertype_id)
                         # get and parse offer names
                         if name == 'Product_Name':
-                            offername_id = value.replace(' ','_').upper()
+                            offername_id = normalizeKVPValues(value, 'U', _KVP_VALUE_LIMIT_)
                             if offername_id != "":
                                 objOfferNames.append(offername_id)
                                 if offername_id not in fullOfferNames:
@@ -639,18 +693,16 @@ def fetchAndPrepareADIData(input_file):
         logger.info("Finished to process the KVPs")
 
     except TypeError as tp:
-        logger.info("Serialization error")
-        logger.debug(f"Serialization error: {tp}")
+        logger.error(f"Serialization error: {tp}")
         for i, item in enumerate(exportObject):
             try:
                 json.dumps(item)
             except TypeError as inner_e:
-                logger.debug(f"exportObject[{i}] failed: {inner_e}")
+                logger.error(f"exportObject[{i}] failed: {inner_e}")
                 logger.debug(json.dumps(item, indent=2, default=str))
                 break
     except Exception as e:
-        logger.info("Error fetchAndPrepareADIData")
-        logger.debug(f"Error fetchAndPrepareADIData: {e}")
+        logger.error(f"Error fetchAndPrepareADIData: {e}")
 
 ######################################################################################################
 # Save the metadata structure into the export json file
@@ -674,8 +726,7 @@ def saveMetadataFile():
         jsonlFile = filenameA
 
     except Exception as e:
-        logger.info("Error saveMetadataFile")
-        logger.debug(f"Error saveMetadataFile: {e}")
+        logger.error(f"Error saveMetadataFile: {e}")
 
 ######################################################################################################
 # Create BOTO client for AWS access
@@ -750,7 +801,13 @@ def check_bucket(client):
             if 'ingested' in fKey:
                 logger.debug(f"{file_name} File Uploaded Successfully.")
             elif 'errinfo' in fKey:
-                failed_result = client.get_object(Bucket=outBucket, Key=irisTN + "/content/failed/" + fKey)
+                logger.debug(f"errInfo identified in: {fKey}")
+                logger.debug(f"complete path: {irisTN + "/content/failed/" + fKey}")
+                try: 
+                    failed_result = client.get_object(Bucket=outBucket, Key=irisTN + "/content/failed/" + fKey)
+                except Exception as e:
+                    #logger.debug(f"reference: {contents}")
+                    logger.error(f"failed to get the failed file: {e}")
                 logger.debug(f"ERROR processing {file_name}")
                 logger.debug(failed_result)
                 logger.debug(failed_result["Body"].read())
@@ -763,8 +820,8 @@ def check_bucket(client):
 # Wait function
 ######################################################################################################
 def wait(seconds):
-    for i in range(seconds, 0, -1):
-        time.sleep(1)
+    #for i in range(seconds, 0, -1):
+    time.sleep(seconds)
 
 
 ######################################################################################################
@@ -803,6 +860,7 @@ parser.add_argument('-input', type=str, default='',help='ADI input file (.xml)')
 parser.add_argument('-output', type=str, default='',help='Iris Tenant ID')
 parser.add_argument('-log', type=str, default='file', choices=['file'], help='Log output destination')
 parser.add_argument('-level', type=str, default='debug', choices=['info', 'debug'], help='Log verbosity level')
+parser.add_argument('-mode', type=str, default='file', choices=['file','directory'], help='If the script should process a single ADI file or a directory with multiple ADI files')
 parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
 parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
 args = parser.parse_args()
@@ -824,11 +882,18 @@ if irisTK == '' and args.export == 'yes':
     logger.debug("Calling getIrisAccessToken")
     getIrisAccessToken()
 
-# Get Go VOD data export 
-logger.debug("Fetching Go Catalog")
-fetchAndPrepareADIData(input_file)
-logger.debug(f"len(exportObject): {str(len(exportObject))}")
-logger.debug(f"ExportObject: {exportObject}")
+# Get ADI data to export 
+if args.mode == 'file':
+    logger.debug(f"Fetching Single ADI file: {input_file}")
+    fetchAndPrepareADIData(input_file)
+    logger.debug(f"len(exportObject): {str(len(exportObject))}")
+else:
+    logger.debug(f"Fetching multiple ADI files from directory: {input_file}")
+    for xml_path in iter_xml_files_ci(input_file, recursive=True):
+        logger.debug(f"about to process the file: {xml_path}")
+        fetchAndPrepareADIData(xml_path)
+    logger.debug(f"len(exportObject): {str(len(exportObject))}")
+#logger.debug(f"ExportObject: {exportObject}")
 # Save the jsonl file
 logger.debug("Saving the jsonl file")
 saveMetadataFile()
