@@ -1,10 +1,7 @@
 # prerequisites:
 #     pip install requests
 #     pip install boto3
-#     pip install paramiko
-
-# Usage:
-#       python <script_name>.py -input <Local_ADI_File> -output <Iris_Tenant_ID> -export <yes|no> -deleletefile <yes|no>
+#
 #
 # 
 #
