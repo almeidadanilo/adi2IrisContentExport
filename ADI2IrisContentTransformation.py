@@ -799,7 +799,7 @@ def check_bucket(client):
                 logger.debug(f"{file_name} File Uploaded Successfully.")
             elif 'errinfo' in fKey:
                 logger.debug(f"errInfo identified in: {fKey}")
-                logger.debug(f"complete path: {irisTN + "/content/failed/" + fKey}")
+                logger.debug(f"complete path: {irisTN}/content/failed/{fKey}")
                 try: 
                     failed_result = client.get_object(Bucket=outBucket, Key=irisTN + "/content/failed/" + fKey)
                 except Exception as e:
