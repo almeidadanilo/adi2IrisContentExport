@@ -13,6 +13,9 @@
 # v1.7 - Updated KVP Value limit truncation
 #        Added file|directory flag option and multiple ADI file processing
 #           <Danilo Almeida>
+# v1.8 - Update KVP regex schema enforcing
+#        Fixed /content/failed json retrieval
+#           <Danilo Almeida>
 
 import json
 import datetime
@@ -24,6 +27,7 @@ import time
 import logging
 import re
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import timezone
 from cryptography.fernet import Fernet  # type: ignore
@@ -56,7 +60,7 @@ expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.7'
+__CURRENT_VERSION__ = 'v1.8'
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -196,24 +200,31 @@ def normalizeKVPValues(kvp: str, case: str, limit: int) -> str:
         if not kvp:
             return ""
 
+        # 0) normalize unicode & remove diacritics
+        kvp = unicodedata.normalize("NFKD", kvp)
+        kvp = "".join(c for c in kvp if not unicodedata.combining(c))
+
         # 1) spaces/tabs/newlines -> single underscore
         s = re.sub(r"\s+", "_", kvp)
 
         # 2) delete a set of punctuation
-        tmpstr = s.translate(str.maketrans("", "", ".-|/\\,;:()[]{}&!*%#@"))
+        tmpstr = s.translate(str.maketrans("", "", ".-|/\\,;:()[]{}&!*%#@'+=?$^`~´¿¡\""))
 
-        # 3) collapse multiple underscores that might have been created
-        tmpstr = re.sub(r"_+", "_", tmpstr)
-
-        # 4) NEW: remove any non-letters at the start or end
+        # 3) remove any non-letters at the start or end
         tmpstr = re.sub(r"^[^A-Za-z]+", "", tmpstr)   # strip leading non-letters
         tmpstr = re.sub(r"[^A-Za-z]+$", "", tmpstr)   # strip ending non-letters
 
-        # 5) enforce length limit (if any)
+        # 4) collapse multiple underscores that might have been created
+        tmpstr = re.sub(r"_+", "_", tmpstr)
+
+        # 5) FINAL: enforce regex character set [A-Za-z0-9_.~-]
+        tmpstr = re.sub(r"[^A-Za-z0-9_.~-]", "", tmpstr)
+
+        # 6) enforce length limit (if any)
         if limit > 0 and len(tmpstr) > limit:
             tmpstr = tmpstr[:limit]
 
-        # 6) casing
+        # 7) casing
         if case == "U":
             tmpstr = tmpstr.upper()
         elif case == "L":
@@ -801,7 +812,7 @@ def check_bucket(client):
                 logger.debug(f"errInfo identified in: {fKey}")
                 logger.debug(f"complete path: {irisTN}/content/failed/{fKey}")
                 try: 
-                    failed_result = client.get_object(Bucket=outBucket, Key=irisTN + "/content/failed/" + fKey)
+                    failed_result = client.get_object(Bucket=outBucket, Key=fKey)
                 except Exception as e:
                     #logger.debug(f"reference: {contents}")
                     logger.error(f"failed to get the failed file: {e}")
@@ -817,7 +828,6 @@ def check_bucket(client):
 # Wait function
 ######################################################################################################
 def wait(seconds):
-    #for i in range(seconds, 0, -1):
     time.sleep(seconds)
 
 
