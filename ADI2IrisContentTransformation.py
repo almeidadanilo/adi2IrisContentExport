@@ -16,13 +16,16 @@
 # v1.8 - Update KVP regex schema enforcing
 #        Fixed /content/failed json retrieval
 #           <Danilo Almeida>
+# v1.9 - Update fixes for stability (AXP case)
+#        Multiple stability changes
+#           <Danilo Almeida>
 
 import json
 import datetime
 import os
-import requests                         # type: ignore
+import requests                                 # type: ignore
 import argparse
-import boto3                            # type: ignore
+import boto3                                    # type: ignore
 import time
 import logging
 import re
@@ -30,9 +33,10 @@ import sys
 import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import timezone
-from cryptography.fernet import Fernet  # type: ignore
-from pathlib import Path                # type: ignore
-from typing import Iterator, Union      # type: ignore
+from cryptography.fernet import Fernet          # type: ignore
+from pathlib import Path                        # type: ignore
+from typing import Iterator, Union              # type: ignore
+from boto3.s3.transfer import TransferConfig    # type: ignore
 
 ######################################################################################################
 # Global variables
@@ -60,7 +64,31 @@ expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.8'
+__CURRENT_VERSION__ = 'v1.9'
+
+
+
+# Remove illegal control characters (XML 1.0)
+_invalid_xml_chars_re = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
+
+# Replace raw & not part of an entity
+_amp_fix_re = re.compile(r'&(?![a-zA-Z0-9#]+;)')
+
+######################################################################################################
+# Cleans the XML (ADI) file from invalid chars belore parsing it
+######################################################################################################
+def sanitize_xml(xml_text: str) -> str:
+    # 1. Remove illegal characters
+    xml_text = _invalid_xml_chars_re.sub("", xml_text)
+    # 2. Fix raw '&' (but keep &amp;, &lt;, &#123;, etc.)
+    xml_text = _amp_fix_re.sub("&amp;", xml_text)
+    # 3. Escape '<' inside attribute values
+    xml_text = re.sub(
+        r'="[^"]*<[^"]*"', 
+        lambda m: m.group(0).replace("<", "&lt;"),
+        xml_text
+    )
+    return xml_text
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -243,6 +271,7 @@ def processKVP(key, values):
 
     try:
         logger.debug("Enter processKVP")
+        logger.debug(f"Key: {key}, values: {values}")
 
         # Ensure the key is respecting the character limit
         if len(key) > 20:
@@ -257,8 +286,8 @@ def processKVP(key, values):
         }
         getURL = outKVP + '/' + key
         headers = {"content-Type": "application/json", "Authorization": irisTK}
-        logger.debug(f"KVP API URL: {getURL}")
-        logger.debug(f"KVP API Body: {body}")
+        #logger.debug(f"KVP API URL: {getURL}")
+        #logger.debug(f"KVP API Body: {body}")
 
         if irisTK == '':
             return
@@ -307,20 +336,26 @@ def processKVP(key, values):
 # Format the person name for Iris format and invert last with first name
 ######################################################################################################
 def format_person_name(name):
-    if ',' in name:
-        last, first = [part.strip() for part in name.split(',', 1)]
-        return f"{first}_{last}".replace(' ', '_')
-    return name.replace(' ', '_')
+    try:
+        if ',' in name:
+            last, first = [part.strip() for part in name.split(',', 1)]
+            return f"{first}_{last}".replace(' ', '_')
+        return name.replace(' ', '_')
+    except Exception as e:
+        logger.error(f"Error format_person_name: {e}")    
 
 ######################################################################################################
 # Iterate on a provided directory for all XML files
 ######################################################################################################
 def iter_xml_files_ci(directory: Union[str, Path], recursive: bool = False):
-    p = Path(directory)
-    pattern = "**/*" if recursive else "*"
-    for path in p.glob(pattern):
-        if path.is_file() and path.suffix.lower() == ".xml":
-            yield path
+    try:
+        p = Path(directory)
+        pattern = "**/*" if recursive else "*"
+        for path in p.glob(pattern):
+            if path.is_file() and path.suffix.lower() == ".xml":
+                yield path
+    except Exception as e:
+        logger.error(f"Error iter_xml_files_ci: {e}")
 
 ######################################################################################################
 # Build json response from ADI
@@ -380,11 +415,45 @@ def fetchAndPrepareADIData(input_file):
 
     try:
         # Load the XML file
-        tree = ET.parse(input_file)
+        # --- Step 1: Read bytes safely ---
+        with open(input_file, "rb") as f:
+            raw_bytes = f.read()
+        
+        #logger.debug(f"DEBUG FIRST 40 BYTES: {raw_bytes[:40]}")
+
+        # --- Step 2: Strip UTF-8 BOM (if present) ---
+        raw_bytes = raw_bytes.lstrip(b'\xef\xbb\xbf')
+
+        # --- Step 3: Decode safely ---
+        raw = raw_bytes.decode("utf-8", errors="replace")
+
+        # --- Step 4: Remove anything before first '<' ---
+        first_tag_index = raw.find("<")
+        if first_tag_index > 0:
+            raw = raw[first_tag_index:]
+
+        # --- Step 5: Sanitize ---
+        clean_xml = sanitize_xml(raw)
+
+        #logger.debug(f"DEBUG FIRST 40 BYTES: {clean_xml[:40]}")
+
+        # --- Step 6: Parse ---
+        tree = ET.ElementTree(ET.fromstring(clean_xml))
         root = tree.getroot()
+        if root is None:
+            logger.error(f"Error fetchAndPrepareADIData[root is none]: {input_file}, please fix the ADI file")
+            return
+        #tree = ET.parse(input_file)
+        #root = tree.getroot()
         # Get the main metadata (package-level)
         package_metadata = root.find('./Metadata')
+        if package_metadata is None:
+            logger.error(f"Error fetchAndPrepareADIData[package_metadata is none]: {input_file}, please fix the ADI file")
+            return
         package_ams = package_metadata.find('AMS')
+        if package_ams is None:
+            logger.error(f"Error fetchAndPrepareADIData[package_ams is none]: {input_file}, please fix the ADI file")
+            return        
         logger.debug(f"Package Asset_Name: {str(package_ams.attrib.get('Asset_Name'))}")
         logger.debug(f"Package Asset_ID: {str(package_ams.attrib.get('Asset_ID'))}")
         #txtContentName = package_ams.attrib.get('Asset_Name', '')
@@ -709,6 +778,12 @@ def fetchAndPrepareADIData(input_file):
                 logger.error(f"exportObject[{i}] failed: {inner_e}")
                 logger.debug(json.dumps(item, indent=2, default=str))
                 break
+    except ET.ParseError as pe:
+        cmp = str(pe)
+        if "no element found" in cmp or "not well-formed" in cmp or "not at start of entity" in cmp:
+            logger.error(f"ADI XML [{input_file}] is empty, malformed or truncated — please fix the ADI file.")
+            
+        logger.error(f"Error fetchAndPrepareADIData[ET.ParseError]: {pe}")
     except Exception as e:
         logger.error(f"Error fetchAndPrepareADIData: {e}")
 
@@ -740,25 +815,32 @@ def saveMetadataFile():
 # Create BOTO client for AWS access
 ######################################################################################################
 def create_boto3_client():
-    logger.debug("Entering create_boto3_client")
     global irisTK, out_headers, irisTN, outACR
 
-    myURL = outACR
-    headers = {"Authorization": irisTK}
-    response = requests.post(myURL, headers=headers)
-    responseJSON = response.json()
+    try:
+        logger.debug("Entering create_boto3_client")
 
-    AccessKeyId = responseJSON['AccessKeyId']
-    SecretAccessKey = responseJSON['SecretAccessKey']
-    SessionToken = responseJSON['SessionToken']
+        myURL = outACR
+        headers = {"Authorization": irisTK}
+        response = requests.post(myURL, headers=headers)
+        responseJSON = response.json()
 
-    client = boto3.client(
-        's3',
-        aws_access_key_id = AccessKeyId,
-        aws_secret_access_key = SecretAccessKey,
-        aws_session_token = SessionToken
-    )
-    out_headers = {"content-Type": "application/json", "X-iris-tenantId": irisTN,"Authorization": irisTK}
+        AccessKeyId = responseJSON['AccessKeyId']
+        SecretAccessKey = responseJSON['SecretAccessKey']
+        SessionToken = responseJSON['SessionToken']
+
+        client = boto3.client(
+            's3',
+            aws_access_key_id = AccessKeyId,
+            aws_secret_access_key = SecretAccessKey,
+            aws_session_token = SessionToken
+        )
+        out_headers = {"content-Type": "application/json", "X-iris-tenantId": irisTN,"Authorization": irisTK}
+
+    except Exception as e:
+        logger.error(f"Error create_boto3_client: {e}")
+        return None
+
     logger.debug("Exiting create_boto3_client")
     return client
 
@@ -766,61 +848,79 @@ def create_boto3_client():
 # Push the jsonl file to AWS through BOTO
 ######################################################################################################
 def send_jsonl(client, method):
-    logger.debug("Entering send_jsonl")
     global jsonlFile, outBucket, irisTN
 
-    if method == "add":
-        s3_bucket_file_path = irisTN + "/content/input/" + jsonlFile.replace('./', '')
-    elif method == "delete":
-        s3_bucket_file_path = irisTN + "/content/deleted/" + jsonlFile.replace('./', '')
-    
-    logger.debug(f"jsonlFile: {jsonlFile}")
-    logger.debug(f"outBucket: {outBucket}")
-    logger.debug(f"s3_bucket_file_path: {s3_bucket_file_path}")
-    logger.debug(f"irisTN: {irisTN}")
+    try:
+        logger.debug("Entering send_jsonl")
 
-    response_put = client.upload_file(jsonlFile.replace('./', ''), outBucket, s3_bucket_file_path)
+        if method == "add":
+            s3_bucket_file_path = irisTN + "/content/input/" + jsonlFile.replace('./', '')
+        elif method == "delete":
+            s3_bucket_file_path = irisTN + "/content/deleted/" + jsonlFile.replace('./', '')
+        
+        logger.debug(f"jsonlFile: {jsonlFile}")
+        logger.debug(f"outBucket: {outBucket}")
+        logger.debug(f"s3_bucket_file_path: {s3_bucket_file_path}")
+        logger.debug(f"irisTN: {irisTN}")
 
-    logger.debug(f"Response: {response_put}")
+        config = TransferConfig(use_threads=False)
+        response_put = client.upload_file(
+            jsonlFile.replace('./', ''),
+            outBucket,
+            s3_bucket_file_path,
+            Config=config
+        )
+        #response_put = client.upload_file(jsonlFile.replace('./', ''), outBucket, s3_bucket_file_path)
+
+        logger.debug(f"Response: {response_put}")
+        
+    except Exception as e:
+        logger.error(f"Error send_jsonl: {e}")
+
     logger.debug("Exiting send_jsonl")
 
 ######################################################################################################
 # Check if the file is processed in the S3 bucket
 ######################################################################################################
 def check_bucket(client):
-    logger.debug("Entering check_bucket")
-
     global outBucket, jsonlFile
 
-    file_name = jsonlFile.replace('./', '')
-    fKey = ''
+    try:
+        logger.debug("Entering check_bucket")
+        file_name = jsonlFile.replace('./', '')
+        fKey = ''
 
-    response = client.list_objects(Bucket=outBucket)
-    contents = response['Contents']
+        response = client.list_objects(Bucket=outBucket)
+        contents = response['Contents']
 
-    logger.debug(f"Bucket: {outBucket}")
-    logger.debug(f"FileName: {file_name}")
-    
-    for i in range(len(contents)):
-        fKey = contents[i]['Key']
-        #logger.debug(f"S3 Bucket Files: {fKey}")
-        if file_name in fKey:
-            logger.debug(f"S3 Bucket Files: {fKey}")
-            if 'ingested' in fKey:
-                logger.debug(f"{file_name} File Uploaded Successfully.")
-            elif 'errinfo' in fKey:
-                logger.debug(f"errInfo identified in: {fKey}")
-                logger.debug(f"complete path: {irisTN}/content/failed/{fKey}")
-                try: 
-                    failed_result = client.get_object(Bucket=outBucket, Key=fKey)
-                except Exception as e:
-                    #logger.debug(f"reference: {contents}")
-                    logger.error(f"failed to get the failed file: {e}")
-                logger.debug(f"ERROR processing {file_name}")
-                logger.debug(failed_result)
-                logger.debug(failed_result["Body"].read())
-            else:
-                logger.debug(f"{file_name} File not uploaded or not processed.")
+        logger.debug(f"Bucket: {outBucket}")
+        logger.debug(f"FileName: {file_name}")
+        
+        for i in range(len(contents)):
+            fKey = contents[i]['Key']
+            #logger.debug(f"S3 Bucket Files: {fKey}")
+            if file_name in fKey:
+                logger.debug(f"S3 Bucket Files: {fKey}")
+                if 'ingested' in fKey:
+                    logger.debug(f"{file_name} File Uploaded Successfully.")
+                elif 'errinfo' in fKey:
+                    logger.debug(f"errInfo identified in: {fKey}")
+                    logger.debug(f"complete path: {irisTN}/content/failed/{fKey}")
+                    try: 
+                        failed_result = client.get_object(Bucket=outBucket, Key=fKey)
+                    except Exception as e:
+                        #logger.debug(f"reference: {contents}")
+                        logger.error(f"failed to get the failed file: {e}")
+                    logger.debug(f"ERROR processing {file_name}")
+                    logger.debug(failed_result)
+                    logger.debug(failed_result["Body"].read())
+                else:
+                    logger.debug(f"{file_name} File not uploaded or not processed.")
+                #endif
+            #endif
+        #endfor
+    except Exception as e:
+        logger.error(f"Error check_bucket: {e}")
     
     logger.debug("Exiting check_bucket")
 
@@ -856,76 +956,79 @@ def delete_files():
 
         logger.debug("Exiting delete_files")
     except Exception as e:
-        logger.error("Error delete_files")
         logger.error(f"Error delete_files: {e}")
 
 ######################################################################################################
 # Main Loop
 ######################################################################################################
-parser = argparse.ArgumentParser()
-parser.add_argument('-input', type=str, default='',help='ADI input file (.xml)')
-parser.add_argument('-output', type=str, default='',help='Iris Tenant ID')
-parser.add_argument('-log', type=str, default='file', choices=['file'], help='Log output destination')
-parser.add_argument('-level', type=str, default='debug', choices=['info', 'debug'], help='Log verbosity level')
-parser.add_argument('-mode', type=str, default='file', choices=['file','directory'], help='If the script should process a single ADI file or a directory with multiple ADI files')
-parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
-parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
-args = parser.parse_args()
-input_file = args.input
-iristenant = args.output
+try:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-input', type=str, default='',help='ADI input file (.xml)')
+    parser.add_argument('-output', type=str, default='',help='Iris Tenant ID')
+    parser.add_argument('-log', type=str, default='file', choices=['file'], help='Log output destination')
+    parser.add_argument('-level', type=str, default='debug', choices=['info', 'debug'], help='Log verbosity level')
+    parser.add_argument('-mode', type=str, default='file', choices=['file','directory'], help='If the script should process a single ADI file or a directory with multiple ADI files')
+    parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
+    parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
+    args = parser.parse_args()
+    input_file = args.input
+    iristenant = args.output
 
-setup_logger(args.log, args.level)
+    setup_logger(args.log, args.level)
 
-logger.debug("#######################################")
-logger.debug(f'# BEGIN PROCESSING {os.path.basename(__file__)} {__CURRENT_VERSION__}')
-logger.debug("#######################################")
+    logger.debug("#######################################")
+    logger.debug(f'# BEGIN PROCESSING {os.path.basename(__file__)} {__CURRENT_VERSION__}')
+    logger.debug("#######################################")
 
-if (not(getOutputItems(iristenant))):
-    logger.debug ('Error getting output items')
-    sys.exit(1)
+    if (not(getOutputItems(iristenant))):
+        logger.debug ('Error getting output items')
+        sys.exit(1)
 
-# Build Iris Access Token
-if irisTK == '' and args.export == 'yes':
-    logger.debug("Calling getIrisAccessToken")
-    getIrisAccessToken()
+    # Build Iris Access Token
+    if irisTK == '' and args.export == 'yes':
+        logger.debug("Calling getIrisAccessToken")
+        getIrisAccessToken()
 
-# Get ADI data to export 
-if args.mode == 'file':
-    logger.debug(f"Fetching Single ADI file: {input_file}")
-    fetchAndPrepareADIData(input_file)
-    logger.debug(f"len(exportObject): {str(len(exportObject))}")
-else:
-    logger.debug(f"Fetching multiple ADI files from directory: {input_file}")
-    for xml_path in iter_xml_files_ci(input_file, recursive=True):
-        logger.debug(f"about to process the file: {xml_path}")
-        fetchAndPrepareADIData(xml_path)
-    logger.debug(f"len(exportObject): {str(len(exportObject))}")
-#logger.debug(f"ExportObject: {exportObject}")
-# Save the jsonl file
-logger.debug("Saving the jsonl file")
-saveMetadataFile()
-if len(exportObject) == 0:
-    logger.debug ('Error fetching the VOD metadata')
-    sys.exit(1)
+    # Get ADI data to export 
+    if args.mode == 'file':
+        logger.debug(f"Fetching Single ADI file: {input_file}")
+        fetchAndPrepareADIData(input_file)
+        logger.debug(f"len(exportObject): {str(len(exportObject))}")
+    else:
+        logger.debug(f"Fetching multiple ADI files from directory: {input_file}")
+        for xml_path in iter_xml_files_ci(input_file, recursive=True):
+            logger.debug(f"about to process the file: {xml_path}")
+            fetchAndPrepareADIData(xml_path)
+        logger.debug(f"len(exportObject): {str(len(exportObject))}")
+    #logger.debug(f"ExportObject: {exportObject}")
+    # Save the jsonl file
+    logger.debug("Saving the jsonl file")
+    saveMetadataFile()
+    if len(exportObject) == 0:
+        logger.debug ('Error fetching the VOD metadata')
+        sys.exit(1)
 
-if args.export == 'yes':
-    # Create BOTO client
-    logger.debug("Creating BOTO client")
-    bot = create_boto3_client()
-    # Push the jsonl file to AWS Folder
-    logger.debug("Sending the jsonl to S3 bucket")
-    send_jsonl(bot, "add")
-    # Wait for 'n' seconds
-    logger.debug(f"Waiting: {waitingTime}s")
-    wait(waitingTime)
-    # Check if the file was properly processed
-    logger.debug("Checking S3")
-    check_bucket(bot)
+    if args.export == 'yes':
+        # Create BOTO client
+        logger.debug("Creating BOTO client")
+        bot = create_boto3_client()
+        # Push the jsonl file to AWS Folder
+        logger.debug("Sending the jsonl to S3 bucket")
+        send_jsonl(bot, "add")
+        # Wait for 'n' seconds
+        logger.debug(f"Waiting: {waitingTime}s")
+        wait(waitingTime)
+        # Check if the file was properly processed
+        logger.debug("Checking S3")
+        check_bucket(bot)
 
-if args.deletefile == 'yes':
-    # Delete the local files
-    delete_files()
+    if args.deletefile == 'yes':
+        # Delete the local files
+        delete_files()
 
-logger.debug("#######################################")
-logger.debug('# END PROCESSING ')
-logger.debug("#######################################")
+    logger.debug("#######################################")
+    logger.debug('# END PROCESSING ')
+    logger.debug("#######################################")
+except Exception as e:
+    print(f"Error in MAIN execution: {e}")
+    sys.exit(-1)
