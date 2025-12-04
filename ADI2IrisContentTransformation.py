@@ -19,6 +19,8 @@
 # v1.9 - Update fixes for stability (AXP case)
 #        Multiple stability changes
 #           <Danilo Almeida>
+# v1.10 - Update export file name to use UUID instead of the simple timestamp to avoid duplicated names on paralell processing.
+#           <Danilo Almeida>
 
 import json
 import datetime
@@ -31,6 +33,7 @@ import logging
 import re
 import sys
 import unicodedata
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import timezone
 from cryptography.fernet import Fernet          # type: ignore
@@ -64,7 +67,7 @@ expirationBias = 365
 waitingTime = 15
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.9'
+__CURRENT_VERSION__ = 'v1.10'
 
 
 
@@ -794,9 +797,10 @@ def saveMetadataFile():
     global exportObject, output_f_extension, jsonlFile
 
     try:
-        timestamp = datetime.datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f'./{timestamp}' + output_f_extension
-        filenameA = f'./{timestamp}' + '_noindent' + output_f_extension
+        #timestamp = datetime.datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        prefix = str(uuid.uuid4())
+        filename = f'./{prefix}.json'
+        filenameA = f'./{prefix}_noindent{output_f_extension}'
 
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(exportObject, f, indent=4)
