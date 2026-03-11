@@ -15,6 +15,8 @@
 /build
 /dist
 /test
+/ADI2IrisContentTransformation_v1.11
+/ADI2IrisContentTransformation_v1.12
 
 # misc
 .DS_Store

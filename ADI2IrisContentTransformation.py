@@ -1,11 +1,4 @@
-# prerequisites:
-#     pip install requests
-#     pip install boto3
-#
-#
-# 
-#
-# Version:
+####    Version:
 # v1.5 - Coded and Tested with multiple ADI input files.
 #           <Danilo Almeida>
 # v1.6 - Updated Access Tenant credentials
@@ -21,6 +14,10 @@
 #           <Danilo Almeida>
 # v1.10 - Update export file name to use UUID instead of the simple timestamp to avoid duplicated names on paralell processing.
 #           <Danilo Almeida>
+# v1.11 - Bug Fix on local file deletion
+#           <Danilo Almeida>
+# v1.12 - Fix for the AssetId extraction (either package or asset AMS)
+#           <Danilo Almeida> 
 
 import json
 import datetime
@@ -65,9 +62,10 @@ exportObject = []
 c_key = ''
 expirationBias = 365
 waitingTime = 15
+idFrom = 'asset'
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.10'
+__CURRENT_VERSION__ = 'v1.12'
 
 
 
@@ -456,33 +454,59 @@ def fetchAndPrepareADIData(input_file):
         package_ams = package_metadata.find('AMS')
         if package_ams is None:
             logger.error(f"Error fetchAndPrepareADIData[package_ams is none]: {input_file}, please fix the ADI file")
-            return        
-        logger.debug(f"Package Asset_Name: {str(package_ams.attrib.get('Asset_Name'))}")
-        logger.debug(f"Package Asset_ID: {str(package_ams.attrib.get('Asset_ID'))}")
-        #txtContentName = package_ams.attrib.get('Asset_Name', '')
-        # Get the content ID from the Metadata > asset_class='title'
-        txtContentID = package_ams.attrib.get('Asset_ID', '')
-        if txtContentID == '':
-            logger.debug("Error getting the content ID.")
             return
-        # Get the provider ID from the Metadata > asset_class='title'
-        provider_id = package_ams.attrib.get('Provider_ID', '').upper()
-        if provider_id != "":
-            objProviders.append(provider_id)
-            if provider_id not in fullProviders:
-                fullProviders.append(provider_id)
-        # Get the product ID from the Metadata > asset_class='title'
-        product_id = package_ams.attrib.get('Product', '').upper()
-        if product_id != "":
-            objProducts.append(product_id)
-            if product_id not in fullProducts:
-                fullProducts.append(product_id)
+        if idFrom == 'package':
+            logger.debug(f"Package Asset_Name: {str(package_ams.attrib.get('Asset_Name'))}")
+            logger.debug(f"Package Asset_ID: {str(package_ams.attrib.get('Asset_ID'))}")
+            #txtContentName = package_ams.attrib.get('Asset_Name', '')
+            # Get the content ID from the Metadata > asset_class='title'
+            txtContentID = package_ams.attrib.get('Asset_ID', '')
+            if txtContentID == '':
+                logger.debug("Error getting the content ID.")
+                return
+            # Get the provider ID from the Metadata > asset_class='title'
+            provider_id = package_ams.attrib.get('Provider_ID', '').upper()
+            if provider_id != "":
+                objProviders.append(provider_id)
+                if provider_id not in fullProviders:
+                    fullProviders.append(provider_id)
+            # Get the product ID from the Metadata > asset_class='title'
+            product_id = package_ams.attrib.get('Product', '').upper()
+            if product_id != "":
+                objProducts.append(product_id)
+                if product_id not in fullProducts:
+                    fullProducts.append(product_id)
+        else:
+            txtContentID = ''
+            provider_id = ''
+            product_id = ''
+        #endif
         # Iterate through assets
         for asset in root.findall('./Asset'):
             txtEpisodeId = ''
             txtEpisodeName = ''
             txtContentName = ''
             asset_metadata = asset.find('Metadata')
+            ###################################################################
+            # Process the AssetID, Provider, Product ** if the id extraction is set to 'asset'
+            ###################################################################
+            if idFrom == 'asset' and txtContentID == '':
+                for app_data in asset_metadata.findall('AMS'):
+                    logger.debug(f"Asset Asset_Name: {str(app_data.attrib.get('Asset_Name'))}")
+                    logger.debug(f"Asset Asset_ID: {str(app_data.attrib.get('Asset_ID'))}")
+                    txtContentID = app_data.attrib.get('Asset_ID', '')
+                    provider_id = app_data.attrib.get('Provider_ID', '').upper()
+                    if provider_id != "":
+                        objProviders.append(provider_id)
+                        if provider_id not in fullProviders:
+                            fullProviders.append(provider_id)
+                    product_id = app_data.attrib.get('Product', '').upper()
+                    if product_id != "":
+                        objProducts.append(product_id)
+                        if product_id not in fullProducts:
+                            fullProducts.append(product_id)
+                #endfor
+            #endif
             ###################################################################
             # Process the Title ADI section
             ###################################################################
@@ -951,12 +975,12 @@ def delete_files():
             logger.warning(f"File not found for deletion: {jsonlFile}")
 
         # Remove the idented one
-        jsonFile = jsonlFile.replace('_noindent', '')
-        if jsonFile and os.path.exists(jsonFile):
-            os.remove(jsonFile)
-            logger.info(f"Deleted file: {jsonFile}")
+        jsonF = jsonlFile.replace('_noindent.cnt', '').replace('.jsonl','.json')
+        if jsonF and os.path.exists(jsonF):
+            os.remove(jsonF)
+            logger.info(f"Deleted file: {jsonF}")
         else:
-            logger.warning(f"File not found for deletion: {jsonFile}")
+            logger.warning(f"File not found for deletion: {jsonF}")
 
         logger.debug("Exiting delete_files")
     except Exception as e:
@@ -974,6 +998,7 @@ try:
     parser.add_argument('-mode', type=str, default='file', choices=['file','directory'], help='If the script should process a single ADI file or a directory with multiple ADI files')
     parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
     parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
+    parser.add_argument('-idfrom', type=str, default='asset', choices=['package', 'asset'], help='If the script will extrat the assetId from package AMS or asset AMS')
     args = parser.parse_args()
     input_file = args.input
     iristenant = args.output
@@ -992,6 +1017,9 @@ try:
     if irisTK == '' and args.export == 'yes':
         logger.debug("Calling getIrisAccessToken")
         getIrisAccessToken()
+
+    # Set the idFrom
+    idFrom = 'package' if args.idfrom == 'package' else 'asset'
 
     # Get ADI data to export 
     if args.mode == 'file':
