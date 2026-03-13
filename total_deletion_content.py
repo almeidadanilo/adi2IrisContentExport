@@ -7,6 +7,7 @@ import boto3                                    # type: ignore
 import logging
 import sys
 import uuid
+import time
 from datetime import timezone
 from cryptography.fernet import Fernet          # type: ignore
 from pathlib import Path                        # type: ignore
@@ -211,12 +212,14 @@ def send_jsonl(client, file):
 
         config = TransferConfig(use_threads=False)
         response_put = client.upload_file(
-            file.replace('./', ''),
+            #file.replace('./', ''),
+            file,
             outBucket,
             s3_bucket_file_path,
             Config=config
         )
-        logger.debug(f"Response: {response_put}")
+        #logger.debug(f"Config: {config}")
+        #logger.debug(f"Response: {response_put}")
         
     except Exception as e:
         logger.error(f"Error send_jsonl: {e}")
@@ -229,7 +232,7 @@ def send_jsonl(client, file):
 def add_to_deletion_file(data):
     global del_files
     try:
-        fname = f"./del/{str(uuid.uuid4())}.jsonl"
+        fname = f"./del/{str(uuid.uuid4())}.cnt.jsonl"
         logger.debug(f"Writting del file {fname}")
         with open(fname, "w", encoding="utf-8") as f1:
             for item in data:
@@ -275,6 +278,59 @@ def build_deletion_files():
         logger.error(f"Error build_deletion_files: {e}")
 
 ######################################################################################################
+# Wait function
+######################################################################################################
+def wait(seconds):
+    time.sleep(seconds)
+
+######################################################################################################
+# Check if the file is processed in the S3 bucket
+######################################################################################################
+def check_bucket(client, file):
+    global outBucket, irisTN
+
+    try:
+        logger.debug("Entering check_bucket")
+        file_name = file.replace('./', '').replace('del/', '')
+        fKey = ''
+
+        response = client.list_objects(Bucket=outBucket)
+        contents = response['Contents']
+
+        logger.debug(f"Bucket: {outBucket}")
+        logger.debug(f"FileName: {file_name}")
+        
+        for i in range(len(contents)):
+            fKey = contents[i]['Key']
+            if irisTN in fKey:
+                logger.debug(f"S3 Bucket Files: {fKey}")
+                if file_name in fKey:               
+                    logger.debug(f"S3 Bucket Files: {fKey}")
+                    if 'ingested' in fKey:
+                        logger.debug(f"{file_name} File Uploaded Successfully.")
+                    elif 'errinfo' in fKey:
+                        logger.debug(f"errInfo identified in: {fKey}")
+                        logger.debug(f"complete path: {irisTN}/content/failed/{fKey}")
+                        try: 
+                            failed_result = client.get_object(Bucket=outBucket, Key=fKey)
+                        except Exception as e:
+                            #logger.debug(f"reference: {contents}")
+                            logger.error(f"failed to get the failed file: {e}")
+                        logger.debug(f"ERROR processing {file_name}")
+                        logger.debug(failed_result)
+                        logger.debug(failed_result["Body"].read())
+                    else:
+                        logger.debug(f"{file_name} File not uploaded or not processed.")
+                    #endif
+                #endif
+            #endif
+        #endfor
+    except Exception as e:
+        logger.error(f"Error check_bucket: {e}")
+    
+    logger.debug("Exiting check_bucket")
+
+######################################################################################################
 # Main Loop
 ######################################################################################################
 parser = argparse.ArgumentParser()
@@ -309,6 +365,8 @@ logger.debug("Sending the delete jsonl flies to S3 bucket")
 for fl in del_files:
     logger.debug(f"Sending {fl}")
     send_jsonl(bot, fl)
+    wait(10)
+    check_bucket(bot, fl)
 
 logger.debug("#######################################")
 logger.debug('# END PROCESSING ')
