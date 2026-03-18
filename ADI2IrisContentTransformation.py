@@ -18,6 +18,8 @@
 #           <Danilo Almeida>
 # v1.12 - Fix for the AssetId extraction (either package or asset AMS)
 #           <Danilo Almeida> 
+# v1.13 - Fix for limiting the file processing on the directories
+#           <Danilo Almeida> 
 
 import json
 import datetime
@@ -65,8 +67,7 @@ waitingTime = 15
 idFrom = 'asset'
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.12'
-
+__CURRENT_VERSION__ = 'v1.13'
 
 
 # Remove illegal control characters (XML 1.0)
@@ -987,6 +988,38 @@ def delete_files():
         logger.error(f"Error delete_files: {e}")
 
 ######################################################################################################
+# Flush current export batch to file/S3 and optionally clean local files
+######################################################################################################
+def flush_export_batch(bot=None, export_enabled=False, delete_enabled=False, batch_label="batch"):
+    global exportObject
+
+    try:
+        if len(exportObject) == 0:
+            logger.debug(f"No metadata items to flush for {batch_label}.")
+            return 0
+
+        logger.debug(f"Saving the jsonl file for {batch_label}")
+        saveMetadataFile()
+        current_items = len(exportObject)
+
+        if export_enabled:
+            logger.debug(f"Sending the jsonl to S3 bucket for {batch_label}")
+            send_jsonl(bot, "add")
+            logger.debug(f"Waiting: {waitingTime}s")
+            wait(waitingTime)
+            logger.debug(f"Checking S3 for {batch_label}")
+            check_bucket(bot)
+
+        if delete_enabled:
+            delete_files()
+
+        exportObject = []
+        return current_items
+    except Exception as e:
+        logger.error(f"Error flush_export_batch[{batch_label}]: {e}")
+        return 0
+
+######################################################################################################
 # Main Loop
 ######################################################################################################
 try:
@@ -999,6 +1032,7 @@ try:
     parser.add_argument('-export', type=str, default='no', choices=['yes','no'], help='If the script will export the generated file to Iris Tenant')
     parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
     parser.add_argument('-idfrom', type=str, default='asset', choices=['package', 'asset'], help='If the script will extrat the assetId from package AMS or asset AMS')
+    parser.add_argument('-batchsize', type=int, default=500, help='Number of ADI files to process per batch when mode=directory')
     args = parser.parse_args()
     input_file = args.input
     iristenant = args.output
@@ -1020,43 +1054,79 @@ try:
 
     # Set the idFrom
     idFrom = 'package' if args.idfrom == 'package' else 'asset'
+    export_enabled = (args.export == 'yes')
+    delete_enabled = (args.deletefile == 'yes')
+
+    if args.batchsize <= 0:
+        logger.debug("Invalid -batchsize value. It must be greater than zero.")
+        sys.exit(1)
+
+    bot = None
+    if export_enabled:
+        # Create BOTO client once and reuse for all batches
+        logger.debug("Creating BOTO client")
+        bot = create_boto3_client()
+        if bot is None:
+            logger.debug("Error creating BOTO client")
+            sys.exit(1)
 
     # Get ADI data to export 
     if args.mode == 'file':
         logger.debug(f"Fetching Single ADI file: {input_file}")
         fetchAndPrepareADIData(input_file)
-        logger.debug(f"len(exportObject): {str(len(exportObject))}")
+        logger.debug(f"len(exportObject): {str(len(exportObject))} for single file")
+        flushed_items = flush_export_batch(
+            bot=bot,
+            export_enabled=export_enabled,
+            delete_enabled=delete_enabled,
+            batch_label="single-file batch"
+        )
+        if flushed_items == 0:
+            logger.debug ('Error fetching the VOD metadata')
+            sys.exit(1)
     else:
         logger.debug(f"Fetching multiple ADI files from directory: {input_file}")
+        logger.debug(f"Directory batch size: {args.batchsize}")
+
+        files_in_batch = 0
+        total_files = 0
+        total_items = 0
+        batch_number = 1
+
         for xml_path in iter_xml_files_ci(input_file, recursive=True):
             logger.debug(f"about to process the file: {xml_path}")
             fetchAndPrepareADIData(xml_path)
-        logger.debug(f"len(exportObject): {str(len(exportObject))}")
-    #logger.debug(f"ExportObject: {exportObject}")
-    # Save the jsonl file
-    logger.debug("Saving the jsonl file")
-    saveMetadataFile()
-    if len(exportObject) == 0:
-        logger.debug ('Error fetching the VOD metadata')
-        sys.exit(1)
+            files_in_batch += 1
+            total_files += 1
 
-    if args.export == 'yes':
-        # Create BOTO client
-        logger.debug("Creating BOTO client")
-        bot = create_boto3_client()
-        # Push the jsonl file to AWS Folder
-        logger.debug("Sending the jsonl to S3 bucket")
-        send_jsonl(bot, "add")
-        # Wait for 'n' seconds
-        logger.debug(f"Waiting: {waitingTime}s")
-        wait(waitingTime)
-        # Check if the file was properly processed
-        logger.debug("Checking S3")
-        check_bucket(bot)
+            if files_in_batch >= args.batchsize:
+                logger.debug(f"Flushing batch #{batch_number} with {files_in_batch} XML files")
+                flushed_items = flush_export_batch(
+                    bot=bot,
+                    export_enabled=export_enabled,
+                    delete_enabled=delete_enabled,
+                    batch_label=f"directory batch #{batch_number}"
+                )
+                total_items += flushed_items
+                files_in_batch = 0
+                batch_number += 1
 
-    if args.deletefile == 'yes':
-        # Delete the local files
-        delete_files()
+        # Flush the remainder
+        if files_in_batch > 0:
+            logger.debug(f"Flushing final batch #{batch_number} with {files_in_batch} XML files")
+            flushed_items = flush_export_batch(
+                bot=bot,
+                export_enabled=export_enabled,
+                delete_enabled=delete_enabled,
+                batch_label=f"directory final batch #{batch_number}"
+            )
+            total_items += flushed_items
+
+        logger.debug(f"Total XML files processed: {total_files}")
+        logger.debug(f"Total metadata items generated: {total_items}")
+        if total_files == 0 or total_items == 0:
+            logger.debug ('Error fetching the VOD metadata')
+            sys.exit(1)
 
     logger.debug("#######################################")
     logger.debug('# END PROCESSING ')
