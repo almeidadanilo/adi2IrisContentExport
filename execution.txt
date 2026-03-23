@@ -9,3 +9,8 @@ python ADI2IrisContentTransformation.py -input [directory] -output sun902py -mod
 ReelMedia
 
 python ADI2IrisContentTransformation.py -input path_to_the_file -output sun902py -mode file -export yes -deletefile yes -idfrom asset
+
+
+Tests
+
+python ADI2IrisContentTransformation.py -input "D:\Synamedia\Programs & Prospects\ZAF-MTN\Iris - Platform RFP\Scripts\ADI2Iris\AXP\adi2026_feb\adi2026_feb" -output sun902py -mode directory -export no -deletefile no -idfrom asset -batchsize 300 -printing yes

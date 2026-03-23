@@ -20,6 +20,8 @@
 #           <Danilo Almeida> 
 # v1.13 - Fix for limiting the file processing on the directories
 #           <Danilo Almeida> 
+# v1.14 - Multiple fixes & adding apply_adi_xml_fixes() function
+#           <Danilo Almeida> 
 
 import json
 import datetime
@@ -65,9 +67,11 @@ c_key = ''
 expirationBias = 365
 waitingTime = 15
 idFrom = 'asset'
+printing = False
+json_beaultified = False
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.13'
+__CURRENT_VERSION__ = 'v1.14'
 
 
 # Remove illegal control characters (XML 1.0)
@@ -91,6 +95,107 @@ def sanitize_xml(xml_text: str) -> str:
         xml_text
     )
     return xml_text
+
+######################################################################################################
+# Fixes duplicated attributes in <AMS ...> tags (keeps first occurrence)
+######################################################################################################
+def dedupe_ams_attributes(xml_text: str) -> tuple[str, int]:
+    ams_tag_re = re.compile(r"<AMS\b([^<>]*?)(/?)>", flags=re.IGNORECASE | re.DOTALL)
+    attr_re = re.compile(r'([A-Za-z_:][\w:.\-]*)\s*=\s*"([^"]*)"')
+    deduped_attributes = 0
+
+    def _rewrite_ams_tag(match: re.Match) -> str:
+        nonlocal deduped_attributes
+        attrs_part = match.group(1) or ""
+        self_close = match.group(2) or ""
+        seen = set()
+        parts = []
+
+        for attr_match in attr_re.finditer(attrs_part):
+            key = attr_match.group(1)
+            value = attr_match.group(2)
+            key_lc = key.lower()
+            if key_lc in seen:
+                deduped_attributes += 1
+                continue
+            seen.add(key_lc)
+            parts.append(f'{key}="{value}"')
+
+        suffix = "/>" if self_close == "/" else ">"
+        if parts:
+            return "<AMS " + " ".join(parts) + suffix
+        return "<AMS" + suffix
+
+    fixed_xml = ams_tag_re.sub(_rewrite_ams_tag, xml_text)
+    return fixed_xml, deduped_attributes
+
+######################################################################################################
+# Applies extra ADI pre-parsing fixes for known malformed structures
+######################################################################################################
+def apply_adi_xml_fixes(xml_text: str) -> str:
+    xml_text, deduped_ams_attrs = dedupe_ams_attributes(xml_text)
+
+    # Fix malformed self-closing tags missing final ">" (e.g. ..."/\n).
+    xml_text, fixed_self_closing = re.subn(
+        r'(<[^>\n]+?)/[ \t]*(\r?\n)',
+        r'\1/>\2',
+        xml_text
+    )
+
+    # Detect and remove unmatched closing </Asset> tags while preserving valid pairs.
+    # This addresses malformed ADIs that include:
+    # 1) extra closing tags before </ADI>
+    # 2) missing closing tags for opened <Asset> blocks
+    # 3) missing '>' char after '/' char
+    asset_tag_re = re.compile(r"<(/?)Asset\b([^>]*)>", flags=re.IGNORECASE)
+    rebuilt = []
+    last_end = 0
+    open_assets = 0
+    dropped_closing_assets = 0
+
+    for match in asset_tag_re.finditer(xml_text):
+        rebuilt.append(xml_text[last_end:match.start()])
+        full_tag = match.group(0)
+        is_closing = match.group(1) == "/"
+
+        if is_closing:
+            if open_assets > 0:
+                open_assets -= 1
+                rebuilt.append(full_tag)
+            else:
+                dropped_closing_assets += 1
+        else:
+            rebuilt.append(full_tag)
+            if not full_tag.rstrip().endswith("/>"):
+                open_assets += 1
+
+        last_end = match.end()
+
+    rebuilt.append(xml_text[last_end:])
+    fixed_xml = "".join(rebuilt)
+
+    if open_assets > 0:
+        closing_block = "".join(["</Asset>"] * open_assets)
+        adi_close_match = re.search(r"</ADI\s*>", fixed_xml, flags=re.IGNORECASE)
+        if adi_close_match is not None:
+            fixed_xml = (
+                fixed_xml[:adi_close_match.start()]
+                + closing_block
+                + fixed_xml[adi_close_match.start():]
+            )
+        else:
+            fixed_xml = fixed_xml + closing_block
+
+    if dropped_closing_assets > 0:
+        logger.warning(f"ADI pre-processing fixed {dropped_closing_assets} unmatched </Asset> tag(s).")
+    if open_assets > 0:
+        logger.warning(f"ADI pre-processing auto-closed {open_assets} unmatched <Asset> tag(s).")
+    if fixed_self_closing > 0:
+        logger.warning(f"ADI pre-processing fixed {fixed_self_closing} malformed self-closing tag(s) missing '>'.")
+    if deduped_ams_attrs > 0:
+        logger.warning(f"ADI pre-processing removed {deduped_ams_attrs} duplicated AMS attribute(s).")
+
+    return fixed_xml
 
 ######################################################################################################
 # Setup the logging mechanics
@@ -363,7 +468,7 @@ def iter_xml_files_ci(directory: Union[str, Path], recursive: bool = False):
 # Build json response from ADI
 ######################################################################################################
 def fetchAndPrepareADIData(input_file):
-    global exportObject
+    global exportObject, printing
 
     now = datetime.datetime.now(timezone.utc)
     expirationDate = now + datetime.timedelta(days=expirationBias)
@@ -436,9 +541,9 @@ def fetchAndPrepareADIData(input_file):
 
         # --- Step 5: Sanitize ---
         clean_xml = sanitize_xml(raw)
+        clean_xml = apply_adi_xml_fixes(clean_xml)
 
         #logger.debug(f"DEBUG FIRST 40 BYTES: {clean_xml[:40]}")
-
         # --- Step 6: Parse ---
         tree = ET.ElementTree(ET.fromstring(clean_xml))
         root = tree.getroot()
@@ -447,16 +552,16 @@ def fetchAndPrepareADIData(input_file):
             return
         #tree = ET.parse(input_file)
         #root = tree.getroot()
-        # Get the main metadata (package-level)
-        package_metadata = root.find('./Metadata')
-        if package_metadata is None:
-            logger.error(f"Error fetchAndPrepareADIData[package_metadata is none]: {input_file}, please fix the ADI file")
-            return
-        package_ams = package_metadata.find('AMS')
-        if package_ams is None:
-            logger.error(f"Error fetchAndPrepareADIData[package_ams is none]: {input_file}, please fix the ADI file")
-            return
         if idFrom == 'package':
+        # Get the main metadata (package-level)
+            package_metadata = root.find('./Metadata')
+            if package_metadata is None:
+                logger.error(f"Error fetchAndPrepareADIData[package_metadata is none]: {input_file}, please fix the ADI file")
+                return
+            package_ams = package_metadata.find('AMS')
+            if package_ams is None:
+                logger.error(f"Error fetchAndPrepareADIData[package_ams is none]: {input_file}, please fix the ADI file")
+                return
             logger.debug(f"Package Asset_Name: {str(package_ams.attrib.get('Asset_Name'))}")
             logger.debug(f"Package Asset_ID: {str(package_ams.attrib.get('Asset_ID'))}")
             #txtContentName = package_ams.attrib.get('Asset_Name', '')
@@ -478,6 +583,7 @@ def fetchAndPrepareADIData(input_file):
                 if product_id not in fullProducts:
                     fullProducts.append(product_id)
         else:
+            # Values will be retrieved from Asset not package
             txtContentID = ''
             provider_id = ''
             product_id = ''
@@ -749,8 +855,9 @@ def fetchAndPrepareADIData(input_file):
 
         # Avoiding duplications in the exportObject
         content_id = txtContentID
-        if not any(item.get("contentId", "") == content_id for item in exportObject):
-            exportObject.append(objTmp)
+        if content_id != '':
+            if not any(item.get("contentId", "") == content_id for item in exportObject):
+                exportObject.append(objTmp)
         objTmp = {}
         
         # Process the unique collected KVPs
@@ -812,6 +919,7 @@ def fetchAndPrepareADIData(input_file):
             logger.error(f"ADI XML [{input_file}] is empty, malformed or truncated — please fix the ADI file.")
             
         logger.error(f"Error fetchAndPrepareADIData[ET.ParseError]: {pe}")
+        logger.error(clean_xml)
     except Exception as e:
         logger.error(f"Error fetchAndPrepareADIData: {e}")
 
@@ -819,7 +927,7 @@ def fetchAndPrepareADIData(input_file):
 # Save the metadata structure into the export json file
 ######################################################################################################
 def saveMetadataFile():
-    global exportObject, output_f_extension, jsonlFile
+    global exportObject, output_f_extension, jsonlFile, json_beaultified
 
     try:
         #timestamp = datetime.datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -827,8 +935,9 @@ def saveMetadataFile():
         filename = f'./{prefix}.json'
         filenameA = f'./{prefix}_noindent{output_f_extension}'
 
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(exportObject, f, indent=4)
+        if json_beaultified == True:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(exportObject, f, indent=4)
         
         with open(filenameA, "w", encoding="utf-8") as f1:
             for item in exportObject:
@@ -1033,6 +1142,8 @@ try:
     parser.add_argument('-deletefile', type=str, default='no', choices=['yes','no'], help='If the script will delete the json and jsonl files after uploading them to S3 bucket')
     parser.add_argument('-idfrom', type=str, default='asset', choices=['package', 'asset'], help='If the script will extrat the assetId from package AMS or asset AMS')
     parser.add_argument('-batchsize', type=int, default=500, help='Number of ADI files to process per batch when mode=directory')
+    parser.add_argument('-printing', type=str, default='no', choices=["yes", "no"], help="If the script should print the file processing progress in the command line output")
+    parser.add_argument('-json', type=str, default='no', choices=["yes", "no"], help="If the script will also generate the json - beautified version (jsonl is mandatory)")
     args = parser.parse_args()
     input_file = args.input
     iristenant = args.output
@@ -1056,6 +1167,8 @@ try:
     idFrom = 'package' if args.idfrom == 'package' else 'asset'
     export_enabled = (args.export == 'yes')
     delete_enabled = (args.deletefile == 'yes')
+    printing = True if args.printing == 'yes' else False
+    json_beaultified = True if args.json == 'yes' else False
 
     if args.batchsize <= 0:
         logger.debug("Invalid -batchsize value. It must be greater than zero.")
@@ -1095,12 +1208,26 @@ try:
 
         for xml_path in iter_xml_files_ci(input_file, recursive=True):
             logger.debug(f"about to process the file: {xml_path}")
+            if printing == True:
+                print(f"Processing ADI file {total_files}")
             fetchAndPrepareADIData(xml_path)
             files_in_batch += 1
             total_files += 1
 
             if files_in_batch >= args.batchsize:
                 logger.debug(f"Flushing batch #{batch_number} with {files_in_batch} XML files")
+                if printing == True:
+                    print(f"Sending jsonl to Iris due to {files_in_batch} mark")
+                ##################################################################
+                # Force a renewal of AWS credentials and boto connection before every big flush
+                if export_enabled:
+                    # Create BOTO client once and reuse for all batches
+                    logger.debug("Creating BOTO client")
+                    bot = create_boto3_client()
+                if bot is None:
+                    logger.debug("Error creating BOTO client")
+                    sys.exit(1)
+                ##################################################################
                 flushed_items = flush_export_batch(
                     bot=bot,
                     export_enabled=export_enabled,
