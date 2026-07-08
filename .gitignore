@@ -16,9 +16,11 @@
 /dist
 /test
 /__pycache__
+/.agents
 /ADI2IrisContentTransformation_v1.11
 /ADI2IrisContentTransformation_v1.12
 /ADI2IrisContentTransformation_v1.13
+/ADI2IrisContentTransformation_v1.14
 
 # misc
 .DS_Store

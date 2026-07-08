@@ -22,6 +22,8 @@
 #           <Danilo Almeida> 
 # v1.14 - Multiple fixes & adding apply_adi_xml_fixes() function
 #           <Danilo Almeida> 
+# v2.00 - Added aspect ratio ADI processing
+#           <Danilo Almeida>
 
 import json
 import datetime
@@ -69,9 +71,10 @@ waitingTime = 15
 idFrom = 'asset'
 printing = False
 json_beaultified = False
+defaultAspectRatio  = ''
 logger = logging.getLogger("vod_logger")
 _KVP_VALUE_LIMIT_ = 40
-__CURRENT_VERSION__ = 'v1.14'
+__CURRENT_VERSION__ = 'v2.00'
 
 
 # Remove illegal control characters (XML 1.0)
@@ -266,24 +269,15 @@ def getOutputItems(iristenant):
                         outURL = decrypt(item["URL"])
                         logger.debug(f"Iris Authorization API: {outURL}")
                         outGTP = decrypt(item["GT"])
-                        #logger.debug(f"Iris Grants: {outGTP}")
                         outAUT = decrypt(item["AU"])
-                        #logger.debug(f"Iris Authorize Entity: {outAUT}")
                         outCID = decrypt(item["CI"])
-                        #logger.debug(f"Iris ClientID: {outCID}")
                         outCSC = decrypt(item["CS"])
-                        #logger.debug(f"Iris ClientS: {outCSC}")
                         irisTN = item["iristenant"]
                         outBucket = decrypt(item["BK"])
-                        #logger.debug(f"Iris Upload Bucket: {outBucket}")
                         outKVP = decrypt(item["KVP"])
-                        #logger.debug(f"Iris KVP API: {outKVP}")
                         outACR = decrypt(item["ACR"])
-                        #logger.debug(f"Iris AWS: {outACR}")
                         outMetadata = item["METADATA"]
-                        #logger.debug(f"Export ADI Metadata: {outMetadata}")
                         return True
-
         except Exception as e:
             logger.info("Error reading output file")
             logger.debug(f"Error reading output file: {e}")
@@ -338,6 +332,18 @@ def normalizeKVPValues(kvp: str, case: str, limit: int) -> str:
         # 0) normalize unicode & remove diacritics
         kvp = unicodedata.normalize("NFKD", kvp)
         kvp = "".join(c for c in kvp if not unicodedata.combining(c))
+
+        # Normalize aspect ratios only when the entire input is digits:digits.
+        aspect_ratio = re.fullmatch(r"\s*(\d+):(\d+)\s*", kvp)
+        if aspect_ratio:
+            tmpstr = f"ar{aspect_ratio.group(1)}x{aspect_ratio.group(2)}"
+            if limit > 0 and len(tmpstr) > limit:
+                tmpstr = tmpstr[:limit]
+            if case == "U":
+                tmpstr = tmpstr.upper()
+            elif case == "L":
+                tmpstr = tmpstr.lower()
+            return tmpstr
 
         # 1) spaces/tabs/newlines -> single underscore
         s = re.sub(r"\s+", "_", kvp)
@@ -498,6 +504,7 @@ def fetchAndPrepareADIData(input_file):
     objKeywords = []
     objOfferTypes = []
     objOfferNames = []
+    objAspectRatio = []
     #############################################################
     fullGenres = []
     fullParentalRating = []
@@ -519,30 +526,25 @@ def fetchAndPrepareADIData(input_file):
     fullKeywords = []
     fullOfferTypes = []
     fullOfferNames = []
-
+    fullAspectRatio = []
+    #############################################################
     try:
         # Load the XML file
         # --- Step 1: Read bytes safely ---
         with open(input_file, "rb") as f:
             raw_bytes = f.read()
-        
         #logger.debug(f"DEBUG FIRST 40 BYTES: {raw_bytes[:40]}")
-
         # --- Step 2: Strip UTF-8 BOM (if present) ---
         raw_bytes = raw_bytes.lstrip(b'\xef\xbb\xbf')
-
         # --- Step 3: Decode safely ---
         raw = raw_bytes.decode("utf-8", errors="replace")
-
         # --- Step 4: Remove anything before first '<' ---
         first_tag_index = raw.find("<")
         if first_tag_index > 0:
             raw = raw[first_tag_index:]
-
         # --- Step 5: Sanitize ---
         clean_xml = sanitize_xml(raw)
         clean_xml = apply_adi_xml_fixes(clean_xml)
-
         #logger.debug(f"DEBUG FIRST 40 BYTES: {clean_xml[:40]}")
         # --- Step 6: Parse ---
         tree = ET.ElementTree(ET.fromstring(clean_xml))
@@ -755,9 +757,9 @@ def fetchAndPrepareADIData(input_file):
                 ams = sub_metadata.find('AMS')
                 cls = str(ams.attrib.get('Asset_Class'))
                 #print(cls)
-                logger.debug(f"SubPackage Asset_Name: {str(ams.attrib.get('Asset_Name'))}")
-                logger.debug(f"SubPackage Asset_ID: {str(ams.attrib.get('Asset_ID'))}")
-                logger.debug(f"SubPackage Class_ID: {cls}")
+                #logger.debug(f"SubPackage Asset_Name: {str(ams.attrib.get('Asset_Name'))}")
+                #logger.debug(f"SubPackage Asset_ID: {str(ams.attrib.get('Asset_ID'))}")
+                #logger.debug(f"SubPackage Class_ID: {cls}")
                 ###################################################################
                 # Process the Movie ADI section
                 ###################################################################
@@ -787,6 +789,15 @@ def fetchAndPrepareADIData(input_file):
                                 objSubtitles.append(subtitle_id)
                                 if subtitle_id not in fullSubtitles:
                                     fullSubtitles.append(subtitle_id)
+                        # get and parse Aspect Ratio
+                        if name == "X_Aspect_Ratio":
+                            logger.debug(f"name: {name}, value(original): {value}")
+                            aspectRatio_id = normalizeKVPValues(value, 'L', _KVP_VALUE_LIMIT_)
+                            logger.debug(f"name: {name}, value(normalized): {aspectRatio_id}")
+                            if aspectRatio_id != "":
+                                objAspectRatio.append(aspectRatio_id)
+                                if aspectRatio_id not in fullAspectRatio:
+                                    fullAspectRatio.append(aspectRatio_id)
                 ###################################################################
                 # Process the offer-window ADI section
                 ################################################################### 
@@ -809,8 +820,24 @@ def fetchAndPrepareADIData(input_file):
                                 objOfferNames.append(offername_id)
                                 if offername_id not in fullOfferNames:
                                     fullOfferNames.append(offername_id)
-        #################################################################################################
-        #################################################################################################
+                                #endif
+                            #endif
+                        #endif
+                    #endfor
+                #endif
+            #endfor
+        #endfor
+        ########################################################################################################
+        # Apply the default aspect ratio if the X_Aspect_Ratio is not found and the default value is provided
+        if defaultAspectRatio != "":
+            logger.debug(f"default aspect ratio: {defaultAspectRatio}")
+            if len(objAspectRatio) == 0:
+                logger.debug("enter -> 0")
+                a = normalizeKVPValues(defaultAspectRatio, 'L', _KVP_VALUE_LIMIT_)
+                logger.debug(f"default value after normalization: {a}")
+                objAspectRatio.append(a)
+                fullAspectRatio.append(a)
+        ########################################################################################################
         metadata_block = {}     
         # Mapping all variable names to the intended JSON keys
         all_metadata_fields = {
@@ -833,7 +860,8 @@ def fetchAndPrepareADIData(input_file):
             "SubtitleLanguages": objSubtitles,
             "CntKeywords": objKeywords,
             "CntOfferTypes": objOfferTypes,
-            "CntOfferNames": objOfferNames
+            "CntOfferNames": objOfferNames,
+            "CntAspectRatio": objAspectRatio
         }
         # Add to the objTmp only the items listed in outMetadata
         for key, value in all_metadata_fields.items():
@@ -859,7 +887,7 @@ def fetchAndPrepareADIData(input_file):
             if not any(item.get("contentId", "") == content_id for item in exportObject):
                 exportObject.append(objTmp)
         objTmp = {}
-        
+
         # Process the unique collected KVPs
         logger.info("Starting to process the KVPs")
         if (len(fullProviders) > 0 and "CntProviders" in outMetadata):
@@ -902,6 +930,8 @@ def fetchAndPrepareADIData(input_file):
             processKVP("CntOfferTypes", fullOfferTypes)
         if (len(fullOfferNames) > 0 and "CntOfferNames" in outMetadata):
             processKVP("CntOfferNames", fullOfferNames)
+        if (len(fullAspectRatio) > 0 and "CntAspectRatio" in outMetadata):
+            processKVP("CntAspectRatio", fullAspectRatio)
         logger.info("Finished to process the KVPs")
 
     except TypeError as tp:
@@ -1144,6 +1174,7 @@ try:
     parser.add_argument('-batchsize', type=int, default=500, help='Number of ADI files to process per batch when mode=directory')
     parser.add_argument('-printing', type=str, default='no', choices=["yes", "no"], help="If the script should print the file processing progress in the command line output")
     parser.add_argument('-json', type=str, default='no', choices=["yes", "no"], help="If the script will also generate the json - beautified version (jsonl is mandatory)")
+    parser.add_argument('-defaultaspectratio', type=str, default='', help="The default aspect ratio to be applied in case 'X_Aspect_Ratio' is not found")
     args = parser.parse_args()
     input_file = args.input
     iristenant = args.output
@@ -1169,6 +1200,7 @@ try:
     delete_enabled = (args.deletefile == 'yes')
     printing = True if args.printing == 'yes' else False
     json_beaultified = True if args.json == 'yes' else False
+    defaultAspectRatio = args.defaultaspectratio
 
     if args.batchsize <= 0:
         logger.debug("Invalid -batchsize value. It must be greater than zero.")
